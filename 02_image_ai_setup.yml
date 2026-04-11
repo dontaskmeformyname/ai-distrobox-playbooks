@@ -1,0 +1,254 @@
+---
+# ============================================================
+# Playbook 2: Bild-KI – ComfyUI mit ROCm/PyTorch im Distrobox-Container
+# Voraussetzung: Playbook 01 wurde bereits erfolgreich ausgeführt
+# (Container "ai-box" mit ROCm muss existieren)
+# Ausführen mit: ansible-playbook 02_image_ai_setup.yml
+# ============================================================
+
+- name: Bild-KI Setup (ComfyUI + ROCm PyTorch)
+  hosts: localhost
+  connection: local
+  become: false
+
+  vars:
+    container_name: "ai-box"
+    comfyui_dir: "$HOME/ComfyUI"
+    comfyui_port: "8188"
+    python_bin: "python3.12"
+    pytorch_rocm_index: "https://download.pytorch.org/whl/rocm6.2"
+    hsa_override: "10.3.0"
+    # Auf 'true' setzen um ein Beispiel-Modell herunterzuladen
+    download_example_model: false
+    example_model_repo: "stabilityai/stable-diffusion-xl-base-1.0"
+    example_model_file: "sd_xl_base_1.0.safetensors"
+
+  tasks:
+
+    # ── VORAUSSETZUNG: Container prüfen ─────────────────────
+    - name: Prüfe ob Container ai-box existiert
+      ansible.builtin.command: distrobox list
+      register: container_list
+      changed_when: false
+      failed_when: container_name not in container_list.stdout
+
+    - name: Prüfe ob ROCm im Container verfügbar ist
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- which rocminfo
+      register: rocm_check
+      changed_when: false
+      failed_when: false
+
+    - name: ROCm nicht gefunden – Warnung ausgeben
+      ansible.builtin.debug:
+        msg: "⚠️  ROCm nicht gefunden! Bitte zuerst Playbook 01 ausführen."
+      when: rocm_check.rc != 0
+
+    - name: Abbrechen wenn ROCm fehlt
+      ansible.builtin.meta: end_play
+      when: rocm_check.rc != 0
+
+    # ── CONTAINER: Abhängigkeiten installieren ───────────────
+    - name: Python 3.12, Git und Build-Tools installieren
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "sudo apt-get update -qq &&
+        sudo apt-get install -y python3.12 python3.12-venv python3.12-dev
+        git wget build-essential libgl1 libglib2.0-0"
+
+    # ── CONTAINER: ComfyUI klonen ────────────────────────────
+    - name: Prüfe ob ComfyUI bereits geklont ist
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "test -d {{ comfyui_dir }}/.git && echo exists || echo missing"
+      register: comfyui_exists
+      changed_when: false
+
+    - name: ComfyUI Repository klonen
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "git clone https://github.com/comfyanonymous/ComfyUI.git {{ comfyui_dir }}"
+      when: "'missing' in comfyui_exists.stdout"
+
+    - name: ComfyUI auf aktuellen Stand bringen
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "cd {{ comfyui_dir }} && git pull --ff-only"
+      when: "'exists' in comfyui_exists.stdout"
+      changed_when: false
+
+    # ── CONTAINER: Python venv & Pakete ─────────────────────
+    - name: Prüfe ob venv bereits existiert
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "test -f {{ comfyui_dir }}/comfy_venv/bin/activate && echo exists || echo missing"
+      register: venv_check
+      changed_when: false
+
+    - name: Python venv erstellen
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ python_bin }} -m venv {{ comfyui_dir }}/comfy_venv"
+      when: "'missing' in venv_check.stdout"
+
+    - name: pip upgraden
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ comfyui_dir }}/comfy_venv/bin/pip install --quiet --upgrade pip"
+      changed_when: false
+
+    - name: Prüfe ob PyTorch (ROCm) bereits installiert
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ comfyui_dir }}/comfy_venv/bin/python -c 'import torch; print(torch.__version__)'"
+      register: torch_check
+      changed_when: false
+      failed_when: false
+
+    - name: PyTorch mit ROCm-Support installieren (dauert 5–10 min)
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ comfyui_dir }}/comfy_venv/bin/pip install --quiet
+        torch torchvision torchaudio
+        --index-url {{ pytorch_rocm_index }}"
+      when: torch_check.rc != 0
+      async: 900
+      poll: 20
+
+    - name: ComfyUI Python-Abhängigkeiten installieren
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ comfyui_dir }}/comfy_venv/bin/pip install --quiet
+        -r {{ comfyui_dir }}/requirements.txt"
+      async: 300
+      poll: 15
+
+    - name: huggingface-hub installieren (für Modell-Downloads)
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ comfyui_dir }}/comfy_venv/bin/pip install --quiet huggingface-hub"
+
+    # ── CONTAINER: Modell-Verzeichnisstruktur ────────────────
+    - name: Modell-Unterverzeichnisse anlegen
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "mkdir -p {{ comfyui_dir }}/models/{{ item }}"
+      loop:
+        - checkpoints
+        - vae
+        - loras
+        - controlnet
+        - upscale_models
+        - clip
+        - unet
+      changed_when: false
+
+    # ── OPTIONAL: Beispiel-Modell herunterladen ──────────────
+    - name: SDXL Base-Modell herunterladen (optional, ~6 GB)
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "{{ comfyui_dir }}/comfy_venv/bin/huggingface-cli download
+        {{ example_model_repo }} {{ example_model_file }}
+        --local-dir {{ comfyui_dir }}/models/checkpoints"
+      when: download_example_model | bool
+      async: 1800
+      poll: 30
+
+    # ── HOST: Start-Skript erstellen ─────────────────────────
+    - name: ComfyUI Start-Skript erstellen
+      ansible.builtin.copy:
+        dest: "{{ ansible_env.HOME }}/start_comfyui.sh"
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          # ComfyUI starten (in Distrobox-Container ai-box)
+          # Aufruf: ./start_comfyui.sh [--lowvram] [--cpu]
+
+          EXTRA_ARGS="$*"
+
+          distrobox enter {{ container_name }} -- bash -c "
+            source {{ comfyui_dir }}/comfy_venv/bin/activate
+            export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
+            cd {{ comfyui_dir }}
+            python main.py \
+              --listen 0.0.0.0 \
+              --port {{ comfyui_port }} \
+              --fp16-unet \
+              $EXTRA_ARGS
+          "
+
+    # ── HOST: Systemd User-Service ───────────────────────────
+    - name: Systemd User-Verzeichnis sicherstellen
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.config/systemd/user"
+        state: directory
+        mode: "0755"
+
+    - name: ComfyUI systemd User-Service erstellen
+      ansible.builtin.copy:
+        dest: "{{ ansible_env.HOME }}/.config/systemd/user/comfyui-distrobox.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=ComfyUI Bildgenerierung (in Distrobox ai-box)
+          After=default.target
+
+          [Service]
+          ExecStart={{ ansible_env.HOME }}/start_comfyui.sh
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=default.target
+
+    - name: Systemd User-Daemon neu laden
+      ansible.builtin.systemd:
+        daemon_reload: true
+        scope: user
+
+    - name: ComfyUI-Service aktivieren (aber nicht sofort starten)
+      ansible.builtin.systemd:
+        name: comfyui-distrobox.service
+        enabled: true
+        scope: user
+
+    # ── GPU-FUNKTIONSTEST ────────────────────────────────────
+    - name: ROCm GPU-Erkennung testen
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
+        {{ comfyui_dir }}/comfy_venv/bin/python -c
+        'import torch; print(\"CUDA/ROCm verfügbar:\", torch.cuda.is_available());
+        print(\"GPU:\", torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"keine\");
+        print(\"VRAM:\", round(torch.cuda.get_device_properties(0).total_memory/1e9,1), \"GB\" if torch.cuda.is_available() else \"\")'"
+      register: gpu_test
+      changed_when: false
+      ignore_errors: true
+
+    - name: GPU-Test Ergebnis
+      ansible.builtin.debug:
+        msg: "{{ gpu_test.stdout_lines }}"
+      when: gpu_test.rc == 0
+
+    # ── ABSCHLUSS ────────────────────────────────────────────
+    - name: Zusammenfassung
+      ansible.builtin.debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║  ✅  Bild-KI Setup abgeschlossen!                        ║"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  ComfyUI Web-UI  →  http://localhost:{{ comfyui_port }}"
+          - ""
+          - "  Manueller Start:  ~/start_comfyui.sh"
+          - "  Low-VRAM-Modus:   ~/start_comfyui.sh --lowvram"
+          - ""
+          - "  Service starten:  systemctl --user start comfyui-distrobox"
+          - "  Service stoppen:  systemctl --user stop comfyui-distrobox"
+          - ""
+          - "  Modelle ablegen unter:"
+          - "  {{ comfyui_dir }}/models/checkpoints/"
+          - ""
+          - "  Modell-Download (Beispiel SDXL):"
+          - "  Setzt 'download_example_model: true' in den vars"
+          - "  und führe das Playbook erneut aus."
