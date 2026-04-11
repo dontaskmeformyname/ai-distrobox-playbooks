@@ -1,51 +1,52 @@
 ---
-# ============================================================
-# Playbook 1: Text-KI – Distrobox Container + ROCm + Ollama + Open WebUI
-# Ziel-Hardware: AMD Radeon RX 6900 XT (gfx1030 / RDNA2)
-# Ausführen mit: ansible-playbook 01_text_ai_setup.yml
-# ============================================================
+# ==============================================================
+# Playbook 1: Text-KI – Distrobox + ROCm + Ollama + Open WebUI
+# Ziel-Hardware : AMD Radeon RX 6900 XT (RDNA2 / gfx1030)
+# Ausführen mit : ansible-playbook 01_text_ai_setup.yml --ask-become-pass
+#
+# Ergebnis: "Text KI"-Icon im Anwendungsmenü.
+# Doppelklick → Ollama + Open WebUI starten → Browser öffnet sich.
+# ==============================================================
 
-- name: Text-KI Setup (Ollama + Open WebUI)
+- name: Text-KI Setup (Ollama + Open WebUI in Distrobox)
   hosts: localhost
   connection: local
   become: false
 
   vars:
-    container_name: "ai-box"
-    container_image: "ubuntu:24.04"
-    rocm_deb_version: "6.4.70400-1"
-    rocm_path_version: "6.4"
-    ollama_keep_alive: "0"
-    ollama_port: "11434"
-    webui_port: "8080"
-    hsa_override: "10.3.0"
+    container_name:    "ai-box"
+    container_image:   "ubuntu:24.04"
+    hsa_override:      "10.3.0"   # RDNA2 / RX 6900 XT (gfx1030)
+    ollama_keep_alive: "0"        # VRAM nach jeder Anfrage freigeben
+    ollama_port:       "11434"
+    webui_port:        "8080"
 
   tasks:
 
-    # ── HOST: Gruppen & Gerätezugriff ───────────────────────
-    - name: User zu render-Gruppe hinzufügen
+    # ── HOST: Gruppen ──────────────────────────────────────────
+    - name: User zur render-Gruppe hinzufügen
       ansible.builtin.user:
-        name: "{{ ansible_user_id }}"
+        name:   "{{ ansible_facts['user_id'] }}"
         groups: render
         append: true
       become: true
 
-    - name: User zu video-Gruppe hinzufügen
+    - name: User zur video-Gruppe hinzufügen
       ansible.builtin.user:
-        name: "{{ ansible_user_id }}"
+        name:   "{{ ansible_facts['user_id'] }}"
         groups: video
         append: true
       become: true
 
     - name: /dev/kfd Gruppenrechte setzen
       ansible.builtin.file:
-        path: /dev/kfd
+        path:  /dev/kfd
         group: render
-        mode: "0660"
+        mode:  "0660"
       become: true
       ignore_errors: true
 
-    # ── DISTROBOX: Container erstellen ──────────────────────
+    # ── DISTROBOX: Container ───────────────────────────────────
     - name: Prüfe ob Container bereits existiert
       ansible.builtin.command: distrobox list
       register: container_list
@@ -56,7 +57,7 @@
         distrobox create
         --name {{ container_name }}
         --image {{ container_image }}
-        --additional-flags "--device=/dev/kfd --device=/dev/dri --group-add=render --group-add=video"
+        --additional-flags "--device=/dev/kfd"
         --yes
       when: container_name not in container_list.stdout
 
@@ -64,10 +65,14 @@
       ansible.builtin.command: distrobox enter {{ container_name }} -- true
       changed_when: false
 
-    # ── CONTAINER: ROCm installieren ────────────────────────
-    - name: Prüfe ob ROCm bereits vorhanden
-      ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- which rocminfo
+    # ── CONTAINER: ROCm-Repo einrichten ───────────────────────
+    # Strategie:
+    #   1. amdgpu-install .deb (latest) → AMD GPG-Key + amdgpu-Repo
+    #   2. ROCm GPG-Key explizit nach /etc/apt/keyrings/ legen
+    #   3. rocm/apt/latest-Repo eintragen → liefert ROCm 7.x
+    #   4. apt install rocm
+    - name: Prüfe ob ROCm bereits installiert
+      ansible.builtin.command: distrobox enter {{ container_name }} -- which rocminfo
       register: rocm_check
       changed_when: false
       failed_when: false
@@ -75,167 +80,159 @@
     - name: Basis-Pakete installieren
       ansible.builtin.command: >
         distrobox enter {{ container_name }} -- bash -c
-        "sudo apt-get update -qq && sudo apt-get install -y wget gpg ca-certificates"
+        "sudo apt-get update -qq &&
+         sudo apt-get install -y curl wget gpg ca-certificates"
       when: rocm_check.rc != 0
 
-    - name: amdgpu-install Paket herunterladen
+    - name: Neueste amdgpu-install .deb ermitteln und herunterladen
       ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "wget -q https://repo.radeon.com/amdgpu-install/{{ rocm_path_version }}/ubuntu/noble/amdgpu-install_{{ rocm_deb_version }}_all.deb
-        -O /tmp/amdgpu-install.deb"
+        distrobox enter {{ container_name }} -- bash -c "DEB=$(curl -s https://repo.radeon.com/amdgpu-install/latest/ubuntu/noble/ | grep -oP 'amdgpu-install[^\"]+\.deb' | head -1) && wget -q \"https://repo.radeon.com/amdgpu-install/latest/ubuntu/noble/$DEB\" -O /tmp/amdgpu-install.deb"
       when: rocm_check.rc != 0
 
-    - name: amdgpu-install Paket installieren
+    - name: amdgpu-install .deb installieren (richtet AMD GPG-Key + amdgpu-Repo ein)
       ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "sudo apt-get install -y /tmp/amdgpu-install.deb"
+        distrobox enter {{ container_name }} -- bash -c "sudo apt-get install -y /tmp/amdgpu-install.deb"
       when: rocm_check.rc != 0
 
-    - name: ROCm installieren (ohne DKMS – Kernel-Treiber läuft auf dem Host)
+    - name: ROCm GPG-Key nach /etc/apt/keyrings/ legen
       ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "sudo amdgpu-install --usecase=rocm --no-dkms -y"
+        distrobox enter {{ container_name }} -- bash -c "sudo mkdir -p --mode=0755 /etc/apt/keyrings && curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null"
+      when: rocm_check.rc != 0
+
+    - name: ROCm latest-Repo eintragen und Paketindex aktualisieren
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main' | sudo tee /etc/apt/sources.list.d/rocm.list && printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' | sudo tee /etc/apt/preferences.d/rocm-pin-600 > /dev/null && sudo apt-get update -qq"
+      when: rocm_check.rc != 0
+
+    - name: ROCm installieren (aktuelle Version aus latest-Repo)
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c "sudo apt-get install -y rocm"
       when: rocm_check.rc != 0
       async: 600
       poll: 15
 
-    - name: Container-User zu render/video hinzufügen
-      ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "sudo usermod -aG render,video $(whoami)"
-      when: rocm_check.rc != 0
-
-    # ── CONTAINER: Ollama installieren ──────────────────────
+    # ── CONTAINER: Ollama installieren ────────────────────────
     - name: Prüfe ob Ollama bereits installiert
-      ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- which ollama
+      ansible.builtin.command: distrobox enter {{ container_name }} -- which ollama
       register: ollama_check
       changed_when: false
       failed_when: false
 
     - name: Ollama installieren
       ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "curl -fsSL https://ollama.com/install.sh | sh"
+        distrobox enter {{ container_name }} -- bash -c "curl -fsSL https://ollama.com/install.sh | sh"
       when: ollama_check.rc != 0
 
-    - name: OLLAMA_KEEP_ALIVE in .bashrc setzen (VRAM sofort freigeben)
-      ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "grep -q 'OLLAMA_KEEP_ALIVE' ~/.bashrc ||
-        echo 'export OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }}' >> ~/.bashrc"
-      changed_when: false
-
-    - name: HSA_OVERRIDE_GFX_VERSION in .bashrc setzen (RX 6900 XT = gfx1030)
-      ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "grep -q 'HSA_OVERRIDE_GFX_VERSION' ~/.bashrc ||
-        echo 'export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}' >> ~/.bashrc"
-      changed_when: false
-
-    # ── HOST: Systemd User-Service für Ollama ───────────────
-    - name: Systemd User-Verzeichnis sicherstellen
-      ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.config/systemd/user"
-        state: directory
-        mode: "0755"
-
-    - name: Ollama systemd User-Service erstellen
-      ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.config/systemd/user/ollama-distrobox.service"
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Ollama LLM Server (in Distrobox ai-box)
-          After=default.target
-
-          [Service]
-          ExecStart=distrobox enter {{ container_name }} -- \
-            bash -c "OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }} \
-            HSA_OVERRIDE_GFX_VERSION={{ hsa_override }} ollama serve"
-          Restart=on-failure
-          RestartSec=5
-
-          [Install]
-          WantedBy=default.target
-
-    - name: Systemd User-Daemon neu laden
-      ansible.builtin.systemd:
-        daemon_reload: true
-        scope: user
-
-    - name: Ollama-Service aktivieren und starten
-      ansible.builtin.systemd:
-        name: ollama-distrobox.service
-        enabled: true
-        state: started
-        scope: user
-
-    # ── HOST: Open WebUI via Podman ─────────────────────────
-    - name: Prüfe ob Podman verfügbar ist
-      ansible.builtin.command: which podman
-      register: podman_check
+    # ── CONTAINER: Open WebUI installieren ────────────────────
+    - name: Prüfe ob Open WebUI bereits installiert
+      ansible.builtin.command: distrobox enter {{ container_name }} -- which open-webui
+      register: webui_check
       changed_when: false
       failed_when: false
 
-    - name: Prüfe ob Open WebUI Container bereits läuft
-      ansible.builtin.command: podman ps -a --format "{{ '{{' }}.Names{{ '}}' }}"
-      register: podman_containers
-      changed_when: false
-      when: podman_check.rc == 0
-
-    - name: Open WebUI Container starten
+    - name: Open WebUI installieren
       ansible.builtin.command: >
-        podman run -d
-        --name open-webui
-        --network=host
-        -e OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }}
-        -v open-webui:/app/backend/data
-        --restart=always
-        ghcr.io/open-webui/open-webui:main
-      when:
-        - podman_check.rc == 0
-        - "'open-webui' not in podman_containers.stdout"
+        distrobox enter {{ container_name }} -- bash -c "sudo pip install --quiet open-webui"
+      when: webui_check.rc != 0
 
-    - name: Open WebUI systemd User-Service erstellen
+    # ── HOST→CONTAINER: Launcher-Skript ───────────────────────
+    # Datei wird auf dem Host geschrieben (Home ist in Distrobox geteilt),
+    # dann mit sudo in /usr/local/bin/ des Containers installiert.
+    - name: Launcher-Skript auf dem Host vorbereiten
       ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.config/systemd/user/open-webui.service"
+        dest: "{{ ansible_env.HOME }}/.local/share/text-ki-start"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
+          export OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }}
+
+          # Ollama starten falls nicht aktiv
+          if ! pgrep -x ollama > /dev/null; then
+              ollama serve &
+              sleep 2
+          fi
+
+          # Open WebUI starten falls nicht aktiv
+          if ! pgrep -f "open-webui serve" > /dev/null; then
+              OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }} \
+                open-webui serve &
+              # Warten bis HTTP-Port antwortet (max. 60 s)
+              for i in $(seq 1 60); do
+                  curl -sf http://localhost:{{ webui_port }} > /dev/null && break
+                  sleep 1
+              done
+          fi
+
+          xdg-open http://localhost:{{ webui_port }}
+
+    - name: Launcher-Skript im Container nach /usr/local/bin/ installieren
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "sudo cp ~/.local/share/text-ki-start /usr/local/bin/text-ki-start &&
+         sudo chmod +x /usr/local/bin/text-ki-start"
+      args:
+        creates: "{{ ansible_env.HOME }}/.local/share/text-ki-start"
+
+    # ── HOST→CONTAINER: Desktop-Eintrag ───────────────────────
+    - name: Desktop-Eintrag auf dem Host vorbereiten
+      ansible.builtin.copy:
+        dest: "{{ ansible_env.HOME }}/.local/share/text-ki.desktop"
         mode: "0644"
         content: |
-          [Unit]
-          Description=Open WebUI (Ollama Chat-Interface)
-          After=ollama-distrobox.service
+          [Desktop Entry]
+          Version=1.0
+          Type=Application
+          Name=Text KI
+          GenericName=Lokale Text-KI
+          Comment=Ollama und Open WebUI starten
+          Exec=/usr/local/bin/text-ki-start
+          Icon=text-editor
+          Terminal=false
+          Categories=Science;Education;
+          Keywords=AI;LLM;Ollama;
+          StartupNotify=true
 
-          [Service]
-          ExecStart=podman start -a open-webui
-          ExecStop=podman stop open-webui
-          Restart=on-failure
-          RestartSec=10
+    - name: Desktop-Eintrag im Container nach /usr/share/applications/ installieren
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} -- bash -c
+        "sudo cp ~/.local/share/text-ki.desktop /usr/share/applications/text-ki.desktop"
+      args:
+        creates: "{{ ansible_env.HOME }}/.local/share/text-ki.desktop"
 
-          [Install]
-          WantedBy=default.target
-      when: podman_check.rc == 0
+    # ── EXPORT: Icon auf den Host exportieren ─────────────────
+    - name: Applikations-Verzeichnis auf dem Host sicherstellen
+      ansible.builtin.file:
+        path:  "{{ ansible_env.HOME }}/.local/share/applications"
+        state: directory
+        mode:  "0755"
 
-    - name: Open WebUI Service aktivieren
-      ansible.builtin.systemd:
-        name: open-webui.service
-        enabled: true
-        daemon_reload: true
-        scope: user
-      when: podman_check.rc == 0
+    - name: text-ki Icon aus Distrobox auf Host exportieren
+      ansible.builtin.command: >
+        distrobox enter {{ container_name }} --
+        distrobox-export --app text-ki
+      args:
+        creates: "{{ ansible_env.HOME }}/.local/share/applications/text-ki.desktop"
 
-    # ── ABSCHLUSS ────────────────────────────────────────────
+    - name: Desktop-Datenbank aktualisieren
+      ansible.builtin.command: >
+        update-desktop-database {{ ansible_env.HOME }}/.local/share/applications
+      changed_when: false
+      ignore_errors: true
+
+    # ── ABSCHLUSS ──────────────────────────────────────────────
     - name: Zusammenfassung
       ansible.builtin.debug:
         msg:
-          - "╔══════════════════════════════════════════════╗"
-          - "║  ✅  Text-KI Setup abgeschlossen!            ║"
-          - "╚══════════════════════════════════════════════╝"
+          - "╔════════════════════════════════════════════════════╗"
+          - "║  ✅  Text-KI Setup abgeschlossen!                  ║"
+          - "╚════════════════════════════════════════════════════╝"
           - ""
-          - "  Ollama API  →  http://localhost:{{ ollama_port }}"
-          - "  Open WebUI  →  http://localhost:{{ webui_port }}"
+          - "  → Im Anwendungsmenü nach 'Text KI' suchen"
+          - "  → Doppelklick startet Ollama + Open WebUI"
+          - "  → Browser öffnet automatisch http://localhost:{{ webui_port }}"
           - ""
-          - "  Modell laden:"
+          - "  Erstes Modell laden (einmalig nötig):"
           - "  distrobox enter {{ container_name }} -- ollama pull llama3.2"
           - "  distrobox enter {{ container_name }} -- ollama pull mistral"
           - "  distrobox enter {{ container_name }} -- ollama pull deepseek-r1:14b"
