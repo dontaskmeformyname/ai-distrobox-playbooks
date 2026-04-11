@@ -3,10 +3,6 @@
 # Playbook 1: Text-KI – Distrobox + ROCm + Ollama + Open WebUI
 # Ziel-Hardware : AMD Radeon RX 6900 XT (RDNA2 / gfx1030)
 # Ausführen mit : ansible-playbook 01_text_ai_setup.yml --ask-become-pass
-#
-# Architektur:
-# 1. Host-Tasks (Gruppen, Container anlegen)
-# 2. Container-Tasks nativ via Podman-Connection-Plugin
 # ==============================================================
 
 - name: Host Setup & Container Vorbereitung
@@ -15,34 +11,32 @@
   become: false
 
   vars:
-    container_name:    "ai-box"
-    container_image:   "ubuntu:24.04"
+    container_name: "ai-box"
+    container_image: "ubuntu:24.04"
 
   tasks:
-    # ── HOST: Gruppen ──────────────────────────────────────────
     - name: User zur render-Gruppe hinzufügen
       ansible.builtin.user:
-        name:   "{{ ansible_facts['user_id'] }}"
+        name: "{{ ansible_facts['user_id'] }}"
         groups: render
         append: true
       become: true
 
     - name: User zur video-Gruppe hinzufügen
       ansible.builtin.user:
-        name:   "{{ ansible_facts['user_id'] }}"
+        name: "{{ ansible_facts['user_id'] }}"
         groups: video
         append: true
       become: true
 
     - name: /dev/kfd Gruppenrechte setzen
       ansible.builtin.file:
-        path:  /dev/kfd
+        path: /dev/kfd
         group: render
-        mode:  "0660"
+        mode: "0660"
       become: true
       ignore_errors: true
 
-    # ── DISTROBOX: Container erstellen ─────────────────────────
     - name: Prüfe ob Container bereits existiert
       ansible.builtin.command: distrobox list
       register: container_list
@@ -61,7 +55,6 @@
       ansible.builtin.command: distrobox enter {{ container_name }} -- true
       changed_when: false
 
-    # ── ANSIBLE: Container als Host registrieren ───────────────
     - name: Distrobox Container zum Inventory hinzufügen
       ansible.builtin.add_host:
         name: "{{ container_name }}"
@@ -69,22 +62,18 @@
         ansible_user: "{{ ansible_facts['user_id'] }}"
 
 
-# ==============================================================
-# Container Setup (Native Ansible Module im Container)
-# ==============================================================
 - name: Text-KI Setup innerhalb der Distrobox
   hosts: ai-box
   gather_facts: false
-  become: true  # Alles im Container wird als root/sudo ausgeführt
+  become: true
 
   vars:
-    hsa_override:      "10.3.0"
+    hsa_override: "10.3.0"
     ollama_keep_alive: "0"
-    ollama_port:       "11434"
-    webui_port:        "8080"
+    ollama_port: "11434"
+    webui_port: "8080"
 
   tasks:
-    # ── CONTAINER: APT Basis ──────────────────────────────────
     - name: APT-Cache updaten
       ansible.builtin.apt:
         update_cache: true
@@ -101,12 +90,11 @@
           - python3-pip
         state: present
 
-    # ── CONTAINER: ROCm Repository & GPG-Key ──────────────────
     - name: Keyrings Verzeichnis erstellen
       ansible.builtin.file:
         path: /etc/apt/keyrings
         state: directory
-        mode: '0755'
+        mode: "0755"
 
     - name: AMD ROCm GPG-Key herunterladen und dearmoren
       ansible.builtin.shell: |
@@ -123,12 +111,13 @@
     - name: APT-Pinning für ROCm einrichten
       ansible.builtin.copy:
         dest: /etc/apt/preferences.d/rocm-pin-600
+        mode: "0644"
         content: |
           Package: *
           Pin: release o=repo.radeon.com
           Pin-Priority: 600
 
-    - name: ROCm Metapaket installieren (kann dauern)
+    - name: ROCm Metapaket installieren
       ansible.builtin.apt:
         name: rocm
         state: present
@@ -136,7 +125,6 @@
       async: 3600
       poll: 15
 
-    # ── CONTAINER: Ollama & Open WebUI ────────────────────────
     - name: Prüfe ob Ollama bereits installiert ist
       ansible.builtin.command: which ollama
       register: ollama_check
@@ -147,66 +135,42 @@
       ansible.builtin.shell: curl -fsSL https://ollama.com/install.sh | sh
       when: ollama_check.rc != 0
 
-    - name: Open WebUI über pip installieren (systemweit im Container)
+    - name: Open WebUI über pip installieren
       ansible.builtin.pip:
         name: open-webui
         executable: pip3
         extra_args: --break-system-packages
 
 
-# ==============================================================
-# Host Setup (Desktop Integration)
-# ==============================================================
 - name: Desktop-Integration auf dem Host
   hosts: localhost
   connection: local
   become: false
 
   vars:
-    container_name:    "ai-box"
-    hsa_override:      "10.3.0"
+    container_name: "ai-box"
+    hsa_override: "10.3.0"
     ollama_keep_alive: "0"
-    ollama_port:       "11434"
-    webui_port:        "8080"
+    ollama_port: "11434"
+    webui_port: "8080"
 
   tasks:
-    # ── HOST: Launcher-Dateien ────────────────────────────────
     - name: Lokales Share-Verzeichnis sicherstellen
       ansible.builtin.file:
         path: "{{ ansible_facts['env']['HOME'] }}/.local/share"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
-    - name: Launcher-Skript auf dem Host vorbereiten
-      ansible.builtin.copy:
+    - name: Launcher-Skript aus Template auf dem Host erzeugen
+      ansible.builtin.template:
+        src: text-ki-start.j2
         dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/text-ki-start"
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
-          export OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }}
-
-          if ! pgrep -x ollama > /dev/null; then
-              ollama serve >/tmp/ollama.log 2>&1 &
-              sleep 3
-          fi
-
-          if ! pgrep -f "open-webui serve" > /dev/null; then
-              OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }} \
-                open-webui serve >/tmp/open-webui.log 2>&1 &
-          fi
-
-          for i in $(seq 1 60); do
-              curl -sf http://127.0.0.1:{{ webui_port }} >/dev/null && break
-              sleep 1
-          done
-
-          xdg-open http://127.0.0.1:{{ webui_port }}
+        mode: "0755"
 
     - name: Desktop-Eintrag auf dem Host vorbereiten
       ansible.builtin.copy:
         dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/text-ki.desktop"
-        mode: '0644'
+        mode: "0644"
         content: |
           [Desktop Entry]
           Version=1.0
@@ -221,7 +185,6 @@
           Keywords=AI;LLM;Ollama;
           StartupNotify=true
 
-    # ── EXPORT: App in Host integrieren ───────────────────────
     - name: Distrobox Container Launcher exportieren
       ansible.builtin.command: >
         distrobox enter {{ container_name }} -- bash -c
@@ -232,11 +195,11 @@
         creates: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
 
     - name: Desktop-Datenbank aktualisieren
-      ansible.builtin.command: update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
+      ansible.builtin.command: >
+        update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
       changed_when: false
       failed_when: false
 
-    # ── ABSCHLUSS ─────────────────────────────────────────────
     - name: Zusammenfassung
       ansible.builtin.debug:
         msg:

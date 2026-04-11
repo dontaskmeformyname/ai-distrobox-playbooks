@@ -1,0 +1,21 @@
+#!/bin/bash
+export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
+export OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }}
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:$PATH"
+
+if ! pgrep -x ollama > /dev/null; then
+    ollama serve >/tmp/ollama.log 2>&1 &
+    sleep 3
+fi
+
+if ! pgrep -f "open-webui serve" > /dev/null; then
+    OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }} \
+      open-webui serve >/tmp/open-webui.log 2>&1 &
+fi
+
+for i in $(seq 1 60); do
+    curl -sf http://127.0.0.1:{{ webui_port }} >/dev/null && break
+    sleep 1
+done
+
+xdg-open http://127.0.0.1:{{ webui_port }}
