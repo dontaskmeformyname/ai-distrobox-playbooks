@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
 export OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }}
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:$PATH"
@@ -8,9 +8,10 @@ if ! pgrep -x ollama > /dev/null; then
     sleep 3
 fi
 
-if ! pgrep -f "open-webui serve" > /dev/null; then
+# Gefixt: Python Modul-Aufruf statt Binary
+if ! pgrep -f "open_webui serve" > /dev/null; then
     OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }} \
-      open-webui serve >/tmp/open-webui.log 2>&1 &
+      python3 -m open_webui serve >/tmp/open-webui.log 2>&1 &
 fi
 
 for i in $(seq 1 60); do
