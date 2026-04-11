@@ -1,26 +1,80 @@
----
 # ==============================================================
-# Playbook 1: Text-KI – Distrobox + ROCm + Ollama + Open WebUI
-# Ziel-Hardware : AMD Radeon RX 6900 XT (RDNA2 / gfx1030)
-# Ausführen mit : ansible-playbook 01_text_ai_setup.yml --ask-become-pass
+# Playbook 1: Text-KI – Podman + GPU-Erkennung + Ollama + Open WebUI
+# Unterstützte GPUs : NVIDIA (CUDA), AMD (ROCm), Intel (oneAPI)
+# Headless-Server  : Desktop-Integration wird übersprungen
+# Desktop          : systemd User-Service + .desktop-Eintrag
+# Ausführen mit    : ansible-playbook 01_text_ai_setup.yml --ask-become-pass
 # ==============================================================
 
-- name: Host Setup & Container Vorbereitung
+- name: GPU-Erkennung & Podman-Vorbereitung
   hosts: localhost
   connection: local
   become: false
 
   vars:
     container_name: "ai-box"
-    container_image: "ubuntu:24.04"
+    ollama_port: "11434"
+    webui_port: "8080"
+    data_dir: "{{ ansible_facts['env']['HOME'] }}/.local/share/ai-box"
 
   tasks:
-    - name: User zur render-Gruppe hinzufügen
+    # ── GPU-Erkennung ──────────────────────────────────────────
+    - name: NVIDIA GPU prüfen (nvidia-smi)
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_check
+      failed_when: false
+      changed_when: false
+
+    - name: AMD GPU prüfen (rocminfo)
+      ansible.builtin.command: rocminfo
+      register: amd_check
+      failed_when: false
+      changed_when: false
+
+    - name: Intel GPU prüfen (/dev/dri/renderD128 + vendor ID)
+      ansible.builtin.shell: |
+        ls /dev/dri/renderD128 2>/dev/null && \
+        grep -qi 'intel\|8086' /sys/class/drm/card*/device/vendor 2>/dev/null
+      register: intel_check
+      failed_when: false
+      changed_when: false
+
+    - name: Erkannte GPU-Flags setzen
+      ansible.builtin.set_fact:
+        gpu_nvidia: "{{ nvidia_check.rc == 0 }}"
+        gpu_amd:    "{{ amd_check.rc == 0 }}"
+        gpu_intel:  "{{ intel_check.rc == 0 }}"
+
+    - name: GPU-Ergebnis anzeigen
+      ansible.builtin.debug:
+        msg: >
+          GPU-Erkennung: NVIDIA={{ gpu_nvidia }}
+          AMD={{ gpu_amd }}
+          Intel={{ gpu_intel }}
+
+    - name: Warnung – keine GPU erkannt (CPU-only Modus)
+      ansible.builtin.debug:
+        msg: "⚠️  Keine GPU erkannt – Ollama läuft im CPU-only Modus."
+      when: not gpu_nvidia and not gpu_amd and not gpu_intel
+
+    # ── Desktop-Erkennung ──────────────────────────────────────
+    - name: Headless-Modus erkennen (kein DISPLAY/WAYLAND_DISPLAY)
+      ansible.builtin.set_fact:
+        is_headless: "{{ (ansible_facts['env'].get('DISPLAY', '') == '') and
+                         (ansible_facts['env'].get('WAYLAND_DISPLAY', '') == '') }}"
+
+    - name: Modus anzeigen
+      ansible.builtin.debug:
+        msg: "{{ 'Headless-Server erkannt – Desktop-Integration wird übersprungen.' if is_headless else 'Desktop erkannt – Desktop-Integration wird eingerichtet.' }}"
+
+    # ── Gruppen & Geräterechte ─────────────────────────────────
+    - name: User zur render-Gruppe hinzufügen (AMD/Intel)
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
         groups: render
         append: true
       become: true
+      when: gpu_amd or gpu_intel
 
     - name: User zur video-Gruppe hinzufügen
       ansible.builtin.user:
@@ -29,147 +83,259 @@
         append: true
       become: true
 
-    - name: /dev/kfd Gruppenrechte setzen
+    - name: /dev/kfd Gruppenrechte setzen (AMD)
       ansible.builtin.file:
         path: /dev/kfd
         group: render
         mode: "0660"
       become: true
       ignore_errors: true
+      when: gpu_amd
 
-    - name: Prüfe ob Container bereits existiert
-      ansible.builtin.command: distrobox list
-      register: container_list
-      changed_when: false
-
-    - name: Distrobox Container anlegen
-      ansible.builtin.command: >
-        distrobox create
-        --name {{ container_name }}
-        --image {{ container_image }}
-        --additional-flags "--device=/dev/kfd"
-        --yes
-      when: container_name not in container_list.stdout
-
-    - name: Container initialisieren (erster Start)
-      ansible.builtin.command: distrobox enter {{ container_name }} -- true
-      changed_when: false
-
-    - name: Distrobox Container zum Inventory hinzufügen
-      ansible.builtin.add_host:
-        name: "{{ container_name }}"
-        ansible_connection: podman
-        ansible_user: "{{ ansible_facts['user_id'] }}"
-
-
-- name: Text-KI Setup innerhalb der Distrobox
-  hosts: ai-box
-  gather_facts: false
-  become: true
-
-  vars:
-    hsa_override: "10.3.0"
-    ollama_keep_alive: "0"
-    ollama_port: "11434"
-    webui_port: "8080"
-
-  tasks:
-    - name: APT-Cache updaten
-      ansible.builtin.apt:
-        update_cache: true
-
-    - name: Erforderliche Basis-Pakete installieren
-      ansible.builtin.apt:
-        name:
-          - curl
-          - wget
-          - gpg
-          - ca-certificates
-          - zstd
-          - python3
-          - python3-pip
-        state: present
-
-    - name: Keyrings Verzeichnis erstellen
+    # ── Datenverzeichnis ───────────────────────────────────────
+    - name: Datenverzeichnis für Container anlegen
       ansible.builtin.file:
-        path: /etc/apt/keyrings
+        path: "{{ data_dir }}"
         state: directory
         mode: "0755"
 
-    - name: AMD ROCm GPG-Key herunterladen und dearmoren
-      ansible.builtin.shell: |
-        curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg
+    # ── Podman Container erstellen ────────────────────────────
+    - name: Prüfe ob Container bereits existiert
+      ansible.builtin.command: podman ps -a --format '{{ '{{' }}.Names{{ '}}' }}'
+      register: container_list
+      changed_when: false
+
+    - name: Podman Container anlegen (NVIDIA)
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ container_name }}
+        --device nvidia.com/gpu=all
+        --security-opt=label=disable
+        -p {{ ollama_port }}:11434
+        -p {{ webui_port }}:8080
+        -v {{ data_dir }}:/data:z
+        -e OLLAMA_KEEP_ALIVE=0
+        -e DATA_DIR=/data
+        ubuntu:24.04 sleep infinity
+      when:
+        - container_name not in container_list.stdout
+        - gpu_nvidia
+
+    - name: Podman Container anlegen (AMD)
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ container_name }}
+        --device /dev/kfd
+        --device /dev/dri
+        --security-opt=label=disable
+        -p {{ ollama_port }}:11434
+        -p {{ webui_port }}:8080
+        -v {{ data_dir }}:/data:z
+        -e OLLAMA_KEEP_ALIVE=0
+        -e HSA_OVERRIDE_GFX_VERSION={{ amd_gfx_version | default('11.0.0') }}
+        -e DATA_DIR=/data
+        ubuntu:24.04 sleep infinity
+      when:
+        - container_name not in container_list.stdout
+        - gpu_amd
+        - not gpu_nvidia
+
+    - name: Podman Container anlegen (Intel)
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ container_name }}
+        --device /dev/dri
+        --security-opt=label=disable
+        -p {{ ollama_port }}:11434
+        -p {{ webui_port }}:8080
+        -v {{ data_dir }}:/data:z
+        -e OLLAMA_KEEP_ALIVE=0
+        -e DATA_DIR=/data
+        ubuntu:24.04 sleep infinity
+      when:
+        - container_name not in container_list.stdout
+        - gpu_intel
+        - not gpu_nvidia
+        - not gpu_amd
+
+    - name: Podman Container anlegen (CPU-only Fallback)
+      ansible.builtin.command: >
+        podman run -d
+        --name {{ container_name }}
+        --security-opt=label=disable
+        -p {{ ollama_port }}:11434
+        -p {{ webui_port }}:8080
+        -v {{ data_dir }}:/data:z
+        -e OLLAMA_KEEP_ALIVE=0
+        -e DATA_DIR=/data
+        ubuntu:24.04 sleep infinity
+      when:
+        - container_name not in container_list.stdout
+        - not gpu_nvidia
+        - not gpu_amd
+        - not gpu_intel
+
+
+- name: Text-KI Setup innerhalb des Podman Containers
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars:
+    container_name: "ai-box"
+
+  tasks:
+    - name: APT-Cache updaten
+      ansible.builtin.command: podman exec -u root {{ container_name }} apt-get update -qq
+      changed_when: false
+
+    - name: Erforderliche Basis-Pakete installieren
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }}
+        apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip
+      changed_when: true
+
+    - name: Keyrings Verzeichnis erstellen
+      ansible.builtin.command: podman exec -u root {{ container_name }} mkdir -p /etc/apt/keyrings
+      changed_when: false
+
+    # ── NVIDIA CUDA Toolkit ───────────────────────────────────
+    - name: NVIDIA CUDA Repository einrichten
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }} bash -c
+        "curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb &&
+         dpkg -i /tmp/cuda-keyring.deb &&
+         apt-get update -qq"
+      when: hostvars['localhost']['gpu_nvidia'] | bool
+      changed_when: true
+
+    # ── AMD ROCm ──────────────────────────────────────────────
+    - name: AMD ROCm GPG-Key herunterladen
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }} bash -c
+        "curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg"
+      when: hostvars['localhost']['gpu_amd'] | bool
       args:
         creates: /etc/apt/keyrings/rocm.gpg
+      changed_when: true
 
-    - name: ROCm APT-Repository hinzufügen
-      ansible.builtin.apt_repository:
-        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main"
-        state: present
-        filename: rocm
+    - name: AMD ROCm APT-Repository hinzufügen
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }} bash -c
+        "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main' > /etc/apt/sources.list.d/rocm.list &&
+         apt-get update -qq"
+      when: hostvars['localhost']['gpu_amd'] | bool
+      changed_when: true
 
-    - name: APT-Pinning für ROCm einrichten
-      ansible.builtin.copy:
-        dest: /etc/apt/preferences.d/rocm-pin-600
-        mode: "0644"
-        content: |
-          Package: *
-          Pin: release o=repo.radeon.com
-          Pin-Priority: 600
-
-    - name: ROCm Metapaket installieren
-      ansible.builtin.apt:
-        name: rocm
-        state: present
-        update_cache: true
+    - name: AMD ROCm installieren
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }} apt-get install -y rocm
+      when: hostvars['localhost']['gpu_amd'] | bool
       async: 3600
       poll: 15
+      changed_when: true
 
+    # ── Intel oneAPI Level Zero ───────────────────────────────
+    - name: Intel oneAPI Repository einrichten
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }} bash -c
+        "curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor > /etc/apt/keyrings/intel-graphics.gpg &&
+         echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble client' > /etc/apt/sources.list.d/intel-gpu.list &&
+         apt-get update -qq"
+      when: hostvars['localhost']['gpu_intel'] | bool
+      changed_when: true
+
+    - name: Intel Level Zero installieren
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }}
+        apt-get install -y intel-opencl-icd intel-level-zero-gpu level-zero
+      when: hostvars['localhost']['gpu_intel'] | bool
+      changed_when: true
+
+    # ── Ollama ────────────────────────────────────────────────
     - name: Prüfe ob Ollama bereits installiert ist
-      ansible.builtin.command: which ollama
+      ansible.builtin.command: podman exec {{ container_name }} which ollama
       register: ollama_check
       failed_when: false
       changed_when: false
 
     - name: Ollama über Install-Skript installieren
-      ansible.builtin.shell: curl -fsSL https://ollama.com/install.sh | sh
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }} bash -c
+        "curl -fsSL https://ollama.com/install.sh | sh"
       when: ollama_check.rc != 0
+      changed_when: true
 
+    # ── Open WebUI ────────────────────────────────────────────
     - name: Open WebUI über pip installieren
-      ansible.builtin.pip:
-        name: open-webui
-        executable: pip3
-        extra_args: --break-system-packages
+      ansible.builtin.command: >
+        podman exec -u root {{ container_name }}
+        pip3 install open-webui --break-system-packages
+      changed_when: true
 
 
-- name: Desktop-Integration auf dem Host
+- name: systemd User-Service + Desktop-Integration (nur Desktop)
   hosts: localhost
   connection: local
   become: false
 
   vars:
     container_name: "ai-box"
-    hsa_override: "10.3.0"
-    ollama_keep_alive: "0"
     ollama_port: "11434"
     webui_port: "8080"
 
   tasks:
-    - name: Lokales Share-Verzeichnis sicherstellen
+    - name: systemd User-Service Verzeichnis sicherstellen
       ansible.builtin.file:
-        path: "{{ ansible_facts['env']['HOME'] }}/.local/share"
+        path: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
         state: directory
         mode: "0755"
 
-    - name: Launcher-Skript aus Template auf dem Host erzeugen
-      ansible.builtin.template:
-        src: text-ki-start.j2
-        dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/text-ki-start"
+    - name: systemd User-Service für ai-box erstellen
+      ansible.builtin.copy:
+        dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=AI Box Podman Container (Ollama + Open WebUI)
+          After=default.target
+
+          [Service]
+          Type=simple
+          ExecStart=podman start -a {{ container_name }}
+          ExecStop=podman stop {{ container_name }}
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=default.target
+
+    - name: systemd User-Service aktivieren und starten
+      ansible.builtin.systemd:
+        name: ai-box.service
+        state: started
+        enabled: true
+        scope: user
+        daemon_reload: true
+
+    # ── Launcher-Skript ───────────────────────────────────────
+    - name: Lokales bin-Verzeichnis sicherstellen
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
+        state: directory
         mode: "0755"
 
-    - name: Desktop-Eintrag auf dem Host vorbereiten
+    - name: Launcher-Skript aus Template erzeugen
+      ansible.builtin.template:
+        src: text-ki-start.j2
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start"
+        mode: "0755"
+
+    # ── Desktop-Eintrag (nur auf Desktop) ────────────────────
+    - name: Desktop-Eintrag erstellen
       ansible.builtin.copy:
-        dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/text-ki.desktop"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
         mode: "0644"
         content: |
           [Desktop Entry]
@@ -178,27 +344,20 @@
           Name=Text KI
           GenericName=Lokale Text-KI
           Comment=Ollama und Open WebUI starten
-          Exec=/usr/local/bin/text-ki-start
+          Exec={{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start
           Icon=text-editor
           Terminal=false
           Categories=Science;Education;
           Keywords=AI;LLM;Ollama;
           StartupNotify=true
-
-    - name: Distrobox Container Launcher exportieren
-      ansible.builtin.command: >
-        distrobox enter {{ container_name }} -- bash -c
-        "sudo cp ~/.local/share/text-ki-start /usr/local/bin/text-ki-start &&
-         sudo cp ~/.local/share/text-ki.desktop /usr/share/applications/text-ki.desktop &&
-         distrobox-export --app text-ki"
-      args:
-        creates: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
+      when: not is_headless
 
     - name: Desktop-Datenbank aktualisieren
       ansible.builtin.command: >
         update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
       changed_when: false
       failed_when: false
+      when: not is_headless
 
     - name: Zusammenfassung
       ansible.builtin.debug:
@@ -207,9 +366,12 @@
           - "║  ✅  Text-KI Setup abgeschlossen!                  ║"
           - "╚════════════════════════════════════════════════════╝"
           - ""
-          - "  → Im Anwendungsmenü nach 'Text KI' suchen"
-          - "  → Doppelklick startet Ollama + Open WebUI"
-          - "  → Browser öffnet automatisch http://localhost:{{ webui_port }}"
+          - "  Erkannte GPU: NVIDIA={{ gpu_nvidia }}  AMD={{ gpu_amd }}  Intel={{ gpu_intel }}"
+          - "  Modus: {{ 'Headless-Server' if is_headless else 'Desktop' }}"
+          - ""
+          - "  → Dienste starten: systemctl --user start ai-box"
+          - "  → Open WebUI:      http://localhost:{{ webui_port }}"
+          - "  → Ollama API:      http://localhost:{{ ollama_port }}"
           - ""
           - "  Erstes Modell laden:"
-          - "  distrobox enter {{ container_name }} -- ollama pull llama3.2"
+          - "  podman exec {{ container_name }} ollama pull llama3.2"
