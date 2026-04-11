@@ -173,13 +173,13 @@
     # ── HOST: Launcher-Dateien ────────────────────────────────
     - name: Lokales Share-Verzeichnis sicherstellen
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.local/share"
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share"
         state: directory
         mode: '0755'
 
     - name: Launcher-Skript auf dem Host vorbereiten
       ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.local/share/text-ki-start"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/text-ki-start"
         mode: '0755'
         content: |
           #!/bin/bash
@@ -205,7 +205,7 @@
 
     - name: Desktop-Eintrag auf dem Host vorbereiten
       ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.local/share/text-ki.desktop"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/text-ki.desktop"
         mode: '0644'
         content: |
           [Desktop Entry]
@@ -229,10 +229,10 @@
          sudo cp ~/.local/share/text-ki.desktop /usr/share/applications/text-ki.desktop &&
          distrobox-export --app text-ki"
       args:
-        creates: "{{ ansible_env.HOME }}/.local/share/applications/text-ki.desktop"
+        creates: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
 
     - name: Desktop-Datenbank aktualisieren
-      ansible.builtin.command: update-desktop-database {{ ansible_env.HOME }}/.local/share/applications
+      ansible.builtin.command: update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
       changed_when: false
       failed_when: false
 
