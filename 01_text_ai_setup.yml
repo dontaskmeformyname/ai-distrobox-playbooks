@@ -22,6 +22,24 @@
     #               "nvidia:0" (erste NVIDIA), "nvidia:1" (zweite NVIDIA)
     # Per CLI:      -e gpu_override=amd:1
     gpu_override: ""
+    # HSA_OVERRIDE_GFX_VERSION für AMD ROCm in Podman-Containern.
+    # In Containern fehlt /sys/module/amdgpu/version – ROCm kann die
+    # GPU-Architektur nicht automatisch ermitteln. Diese Variable gibt
+    # die GFX-Version manuell vor.
+    # Wert ermitteln (auf dem Host, nicht im Container):
+    #   rocminfo | grep 'Name:' | grep gfx
+    #   Ausgabe z.B. "gfx1030" → Wert "10.3.0"
+    # Häufige Werte:
+    #   gfx1010 → 10.1.0  (RX 5700 XT, RDNA1)
+    #   gfx1030 → 10.3.0  (RX 6800/6900 XT, RDNA2)
+    #   gfx1031 → 10.3.1  (RX 6750 XT, RDNA2)
+    #   gfx1032 → 10.3.2  (RX 6600 XT, RDNA2)
+    #   gfx1100 → 11.0.0  (RX 7900 XTX, RDNA3)
+    #   gfx1101 → 11.0.1  (RX 7800 XT, RDNA3)
+    # Leer lassen wenn ROCm die GPU nativ erkennt (kein Podman-Container).
+    # Per Inventory setzen: amd_gfx_version=10.3.0
+    # Per CLI überschreiben: -e amd_gfx_version=11.0.0
+    amd_gfx_version: ""
 
   tasks:
     - name: "Alle GPUs per lspci auflisten"
@@ -197,12 +215,14 @@
         --name {{ container_name }}
         --device /dev/kfd
         --device {{ amd_render_node | default('/dev/dri/renderD128') }}
+        --group-add render
+        --group-add video
         --security-opt=label=disable
         -p {{ ollama_port }}:11434
         -p {{ webui_port }}:8080
         -v {{ data_dir }}:/data:z
         -e OLLAMA_KEEP_ALIVE=0
-        -e HSA_OVERRIDE_GFX_VERSION={{ amd_gfx_version | default('11.0.0') }}
+        {% if amd_gfx_version != '' %}-e HSA_OVERRIDE_GFX_VERSION={{ amd_gfx_version }}{% endif %}
         -e DATA_DIR=/data
         ubuntu:24.04 sleep infinity
       when:
