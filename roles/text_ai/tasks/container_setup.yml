@@ -1,4 +1,3 @@
----
 # Dieses Task-File läuft mit:
 #   hosts: ai_box_container
 #   connection: containers.podman.podman  (gesetzt via add_host)
@@ -153,9 +152,3 @@
     mode: "0644"
   no_log: true
   notify: supervisord neu laden
-
-handlers:
-  - name: supervisord neu laden
-    ansible.builtin.command:
-      cmd: supervisorctl reread && supervisorctl update
-    failed_when: false
