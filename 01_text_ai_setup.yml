@@ -7,7 +7,7 @@
 # Ausführen mit    : ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
 # ==============================================================
 
-- name: GPU-Erkennung & Podman-Vorbereitung
+- name: "GPU-Erkennung & Podman-Vorbereitung"
   hosts: ai_hosts
   become: false
 
@@ -24,50 +24,50 @@
     gpu_override: ""
 
   tasks:
-    - name: Alle GPUs per lspci auflisten
+    - name: "Alle GPUs per lspci auflisten"
       ansible.builtin.shell:
         cmd: lspci | grep -E 'VGA|3D|Display'
       register: gpu_list_all
       failed_when: false
       changed_when: false
 
-    - name: Gefundene GPUs anzeigen
+    - name: "Gefundene GPUs anzeigen"
       ansible.builtin.debug:
         msg: "{{ gpu_list_all.stdout_lines }}"
 
-    - name: NVIDIA GPUs per lspci auflisten
+    - name: "NVIDIA GPUs per lspci auflisten"
       ansible.builtin.shell:
         cmd: lspci | grep -i nvidia
       register: nvidia_lspci_check
       failed_when: false
       changed_when: false
 
-    - name: AMD GPUs per lspci auflisten
+    - name: "AMD GPUs per lspci auflisten"
       ansible.builtin.shell:
         cmd: lspci | grep -iE 'amd|radeon|advanced micro devices'
       register: amd_lspci_check
       failed_when: false
       changed_when: false
 
-    - name: Intel GPUs per lspci auflisten
+    - name: "Intel GPUs per lspci auflisten"
       ansible.builtin.shell:
         cmd: lspci | grep -iE 'intel.*(graphics|vga|display|uhd|iris|arc)'
       register: intel_lspci_check
       failed_when: false
       changed_when: false
 
-    - name: GPU-Hersteller und Index aus gpu_override parsen
+    - name: "GPU-Hersteller und Index aus gpu_override parsen"
       ansible.builtin.set_fact:
         _gpu_vendor: "{{ gpu_override.split(':')[0] if gpu_override != '' else '' }}"
         _gpu_index:  "{{ gpu_override.split(':')[1] | int if ':' in gpu_override else 0 }}"
 
-    - name: GPU-Flags setzen (Override oder auto-erkannt)
+    - name: "GPU-Flags setzen (Override oder auto-erkannt)"
       ansible.builtin.set_fact:
         gpu_nvidia: "{{ (_gpu_vendor == 'nvidia') or (_gpu_vendor == '' and nvidia_lspci_check.rc == 0) }}"
         gpu_amd:    "{{ (_gpu_vendor == 'amd')    or (_gpu_vendor == '' and amd_lspci_check.rc == 0) }}"
         gpu_intel:  "{{ (_gpu_vendor == 'intel')  or (_gpu_vendor == '' and intel_lspci_check.rc == 0) }}"
 
-    - name: AMD DRI-Node für gewählten Index ermitteln
+    - name: "AMD DRI-Node fuer gewaehlten Index ermitteln"
       ansible.builtin.shell:
         cmd: "ls /dev/dri/renderD* 2>/dev/null | sort | sed -n '{{ (_gpu_index | int) + 1 }}p'"
       register: amd_dri_node
@@ -75,23 +75,23 @@
       failed_when: false
       changed_when: false
 
-    - name: AMD DRI-Node setzen (Fallback: renderD128)
+    - name: "AMD DRI-Node setzen (Fallback renderD128)"
       ansible.builtin.set_fact:
         amd_render_node: "{{ amd_dri_node.stdout | default('/dev/dri/renderD128') | trim }}"
       when: gpu_amd
 
-    - name: NVIDIA GPU-Index für CUDA_VISIBLE_DEVICES setzen
+    - name: "NVIDIA GPU-Index fuer CUDA_VISIBLE_DEVICES setzen"
       ansible.builtin.set_fact:
         nvidia_gpu_index: "{{ _gpu_index }}"
       when: gpu_nvidia
 
-    - name: GPU-Ergebnis anzeigen
+    - name: "GPU-Ergebnis anzeigen"
       ansible.builtin.debug:
         msg: >-
           GPU-Erkennung: NVIDIA={{ gpu_nvidia }} AMD={{ gpu_amd }} Intel={{ gpu_intel }}
           {{ '(manuell: ' + gpu_override + ')' if gpu_override != '' else '(automatisch via lspci)' }}
 
-    - name: Warnung – mehrere GPU-Hersteller erkannt
+    - name: "Warnung – mehrere GPU-Hersteller erkannt"
       ansible.builtin.debug:
         msg: >
           ⚠️  Mehrere GPU-Hersteller erkannt!
@@ -99,7 +99,7 @@
           Verwende gpu_override um eine bestimmte GPU festzulegen (z.B. -e gpu_override=amd:0).
       when: (gpu_nvidia | bool | int) + (gpu_amd | bool | int) + (gpu_intel | bool | int) > 1
 
-    - name: Warnung – mehrere NVIDIA GPUs erkannt
+    - name: "Warnung – mehrere NVIDIA GPUs erkannt"
       ansible.builtin.debug:
         msg: >
           ⚠️  {{ nvidia_lspci_check.stdout_lines | length }} NVIDIA GPUs gefunden.
@@ -109,7 +109,7 @@
         - gpu_nvidia
         - nvidia_lspci_check.stdout_lines | length > 1
 
-    - name: Warnung – mehrere AMD GPUs erkannt
+    - name: "Warnung – mehrere AMD GPUs erkannt"
       ansible.builtin.debug:
         msg: >
           ⚠️  {{ amd_lspci_check.stdout_lines | length }} AMD GPUs gefunden.
@@ -119,22 +119,22 @@
         - gpu_amd
         - amd_lspci_check.stdout_lines | length > 1
 
-    - name: Warnung – keine GPU erkannt (CPU-only Modus)
+    - name: "Warnung – keine GPU erkannt, CPU-only Modus"
       ansible.builtin.debug:
         msg: "⚠️ Keine GPU erkannt – Ollama läuft im CPU-only Modus."
       when: not gpu_nvidia and not gpu_amd and not gpu_intel
 
-    - name: Headless-Modus erkennen (kein DISPLAY/WAYLAND_DISPLAY)
+    - name: "Headless-Modus erkennen (kein DISPLAY oder WAYLAND_DISPLAY)"
       ansible.builtin.set_fact:
         is_headless: >-
           {{ (ansible_facts['env'].get('DISPLAY', '') == '') and
              (ansible_facts['env'].get('WAYLAND_DISPLAY', '') == '') }}
 
-    - name: Modus anzeigen
+    - name: "Modus anzeigen"
       ansible.builtin.debug:
         msg: "{{ 'Headless-Server erkannt – Desktop-Integration wird übersprungen.' if is_headless else 'Desktop erkannt – Desktop-Integration wird eingerichtet.' }}"
 
-    - name: User zur render-Gruppe hinzufügen (AMD/Intel)
+    - name: "User zur render-Gruppe hinzufuegen (AMD/Intel)"
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
         groups: render
@@ -142,14 +142,14 @@
       become: true
       when: gpu_amd or gpu_intel
 
-    - name: User zur video-Gruppe hinzufügen
+    - name: "User zur video-Gruppe hinzufuegen"
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
         groups: video
         append: true
       become: true
 
-    - name: /dev/kfd Gruppenrechte setzen (AMD)
+    - name: "Gruppenrechte fuer /dev/kfd setzen (AMD)"
       ansible.builtin.file:
         path: /dev/kfd
         group: render
@@ -158,19 +158,19 @@
       ignore_errors: true
       when: gpu_amd
 
-    - name: Datenverzeichnis für Container anlegen
+    - name: "Datenverzeichnis fuer Container anlegen"
       ansible.builtin.file:
         path: "{{ data_dir }}"
         state: directory
         mode: "0755"
 
-    - name: Prüfe ob Container bereits existiert
+    - name: "Pruefen ob Container bereits existiert"
       ansible.builtin.command: podman container exists {{ container_name }}
       register: container_exists
       failed_when: false
       changed_when: false
 
-    - name: Podman Container anlegen (NVIDIA)
+    - name: "Podman Container anlegen (NVIDIA)"
       ansible.builtin.command: >-
         podman run -d
         --name {{ container_name }}
@@ -187,7 +187,7 @@
         - container_exists.rc != 0
         - gpu_nvidia
 
-    - name: Podman Container anlegen (AMD)
+    - name: "Podman Container anlegen (AMD)"
       ansible.builtin.command: >-
         podman run -d
         --name {{ container_name }}
@@ -206,7 +206,7 @@
         - gpu_amd
         - not gpu_nvidia
 
-    - name: Podman Container anlegen (Intel)
+    - name: "Podman Container anlegen (Intel)"
       ansible.builtin.command: >-
         podman run -d
         --name {{ container_name }}
@@ -224,7 +224,7 @@
         - not gpu_nvidia
         - not gpu_amd
 
-    - name: Podman Container anlegen (CPU-only Fallback)
+    - name: "Podman Container anlegen (CPU-only Fallback)"
       ansible.builtin.command: >-
         podman run -d
         --name {{ container_name }}
@@ -241,7 +241,7 @@
         - not gpu_amd
         - not gpu_intel
 
-- name: Text-KI Setup innerhalb des Podman Containers
+- name: "Text-KI Setup innerhalb des Podman Containers"
   hosts: ai_hosts
   become: false
   gather_facts: false
@@ -250,21 +250,21 @@
     container_name: "ai-box"
 
   tasks:
-    - name: APT-Cache updaten
+    - name: "APT-Cache updaten"
       ansible.builtin.command: podman exec -u root {{ container_name }} apt-get update -qq
       changed_when: false
 
-    - name: Erforderliche Basis-Pakete installieren
+    - name: "Erforderliche Basis-Pakete installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }}
         apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip
       changed_when: true
 
-    - name: Keyrings Verzeichnis erstellen
+    - name: "Keyrings Verzeichnis erstellen"
       ansible.builtin.command: podman exec -u root {{ container_name }} mkdir -p /etc/apt/keyrings
       changed_when: false
 
-    - name: NVIDIA CUDA Repository einrichten
+    - name: "NVIDIA CUDA Repository einrichten"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb &&
@@ -273,14 +273,14 @@
       when: gpu_nvidia | default(false) | bool
       changed_when: true
 
-    - name: AMD ROCm GPG-Key herunterladen
+    - name: "AMD ROCm GPG-Key herunterladen"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg"
       when: gpu_amd | default(false) | bool
       changed_when: true
 
-    - name: AMD ROCm APT-Repository hinzufügen
+    - name: "AMD ROCm APT-Repository hinzufuegen"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main' > /etc/apt/sources.list.d/rocm.list &&
@@ -288,7 +288,7 @@
       when: gpu_amd | default(false) | bool
       changed_when: true
 
-    - name: AMD ROCm installieren
+    - name: "AMD ROCm installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} apt-get install -y rocm
       when: gpu_amd | default(false) | bool
@@ -296,7 +296,7 @@
       poll: 15
       changed_when: true
 
-    - name: Intel oneAPI Repository einrichten
+    - name: "Intel oneAPI Repository einrichten"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor > /etc/apt/keyrings/intel-graphics.gpg &&
@@ -305,33 +305,33 @@
       when: gpu_intel | default(false) | bool
       changed_when: true
 
-    - name: Intel Level Zero installieren
+    - name: "Intel Level Zero installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }}
         apt-get install -y intel-opencl-icd intel-level-zero-gpu level-zero
       when: gpu_intel | default(false) | bool
       changed_when: true
 
-    - name: Prüfe ob Ollama bereits installiert ist
+    - name: "Pruefen ob Ollama bereits installiert ist"
       ansible.builtin.command: podman exec {{ container_name }} which ollama
       register: ollama_check
       failed_when: false
       changed_when: false
 
-    - name: Ollama über Install-Skript installieren
+    - name: "Ollama ueber Install-Skript installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "curl -fsSL https://ollama.com/install.sh | sh"
       when: ollama_check.rc != 0
       changed_when: true
 
-    - name: Open WebUI über pip installieren
+    - name: "Open WebUI ueber pip installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }}
         pip3 install open-webui --break-system-packages
       changed_when: true
 
-- name: systemd User-Service + Desktop-Integration
+- name: "systemd User-Service und Desktop-Integration"
   hosts: ai_hosts
   become: false
 
@@ -341,13 +341,13 @@
     webui_port: "8080"
 
   tasks:
-    - name: systemd User-Service Verzeichnis sicherstellen
+    - name: "systemd User-Service Verzeichnis sicherstellen"
       ansible.builtin.file:
         path: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
         state: directory
         mode: "0755"
 
-    - name: systemd User-Service für ai-box erstellen
+    - name: "systemd User-Service fuer ai-box erstellen"
       ansible.builtin.copy:
         dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
         mode: "0644"
@@ -366,7 +366,7 @@
           [Install]
           WantedBy=default.target
 
-    - name: systemd User-Service aktivieren und starten
+    - name: "systemd User-Service aktivieren und starten"
       ansible.builtin.systemd:
         name: ai-box.service
         state: started
@@ -374,26 +374,26 @@
         scope: user
         daemon_reload: true
 
-    - name: Lokales bin-Verzeichnis sicherstellen
+    - name: "Lokales bin-Verzeichnis sicherstellen"
       ansible.builtin.file:
         path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
         state: directory
         mode: "0755"
 
-    - name: Launcher-Skript aus Template erzeugen
+    - name: "Launcher-Skript aus Template erzeugen"
       ansible.builtin.template:
         src: templates/text-ki-start.j2
         dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start"
         mode: "0755"
 
-    - name: Lokales applications-Verzeichnis sicherstellen
+    - name: "Lokales applications-Verzeichnis sicherstellen"
       ansible.builtin.file:
         path: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications"
         state: directory
         mode: "0755"
       when: not (is_headless | default(true) | bool)
 
-    - name: Desktop-Eintrag erstellen
+    - name: "Desktop-Eintrag erstellen"
       ansible.builtin.copy:
         dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
         mode: "0644"
@@ -412,14 +412,14 @@
           StartupNotify=true
       when: not (is_headless | default(true) | bool)
 
-    - name: Desktop-Datenbank aktualisieren
+    - name: "Desktop-Datenbank aktualisieren"
       ansible.builtin.command: >-
         update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
       changed_when: false
       failed_when: false
       when: not (is_headless | default(true) | bool)
 
-    - name: Zusammenfassung
+    - name: "Zusammenfassung"
       ansible.builtin.debug:
         msg:
           - "╔════════════════════════════════════════════════════╗"
