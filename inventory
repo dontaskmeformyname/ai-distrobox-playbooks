@@ -4,19 +4,43 @@
 # Remote-Hosts:      als Beispiel auskommentiert
 # ==============================================================
 
+# --- Host-Variablen --------------------------------------------
+# Variablen werden direkt am Host gesetzt (inline),
+# damit jeder Node seine eigene GPU-Konfiguration hat.
+#
+# gpu_override      : "" = automatisch, "amd", "nvidia", "intel",
+#                     "amd:1" für zweite AMD-GPU usw.
+#
+# amd_gfx_version   : HSA_OVERRIDE_GFX_VERSION für ROCm in Podman.
+#                     Wird benötigt weil /sys/module/amdgpu/version
+#                     im Container fehlt (Kernel läuft auf dem Host).
+#                     Wert ermitteln: rocminfo | grep 'Name:' | grep gfx
+#                     z.B. "gfx1030" → "10.3.0"  |  "gfx1100" → "11.0.0"
+#                     Häufige Werte:
+#                       gfx1010 → 10.1.0  (RX 5700 XT,  RDNA1)
+#                       gfx1030 → 10.3.0  (RX 6800/6900 XT, RDNA2)
+#                       gfx1031 → 10.3.1  (RX 6750 XT,  RDNA2)
+#                       gfx1032 → 10.3.2  (RX 6600 XT,  RDNA2)
+#                       gfx1100 → 11.0.0  (RX 7900 XTX, RDNA3)
+#                       gfx1101 → 11.0.1  (RX 7800 XT,  RDNA3)
+#                     Leer lassen bei NVIDIA/Intel oder wenn ROCm
+#                     die GPU nativ erkennt.
+# ---------------------------------------------------------------
+
 [ai_hosts]
-localhost ansible_connection=local
+# RX 6900 XT (RDNA2 = gfx1030)
+localhost ansible_connection=local gpu_override="" amd_gfx_version=10.3.0
 
 # --- Beispiel: Remote-Hosts per SSH ----------------------------
 # Gruppen anlegen und unter [ai_hosts:children] eintragen
 #
 # [desktops]
-# ws-a ansible_host=192.168.1.10 ansible_user=alex
-# ws-b ansible_host=192.168.1.11 ansible_user=alex
+# ws-amd  ansible_host=192.168.1.10 ansible_user=alex gpu_override="" amd_gfx_version=10.3.0
+# ws-nvid ansible_host=192.168.1.11 ansible_user=alex gpu_override="" amd_gfx_version=
 #
 # [servers]
-# ai-01 ansible_host=192.168.1.20 ansible_user=alex
-# ai-02 ansible_host=192.168.1.21 ansible_user=alex
+# ai-01   ansible_host=192.168.1.20 ansible_user=alex gpu_override="nvidia" amd_gfx_version=
+# ai-02   ansible_host=192.168.1.21 ansible_user=alex gpu_override="amd"    amd_gfx_version=11.0.0
 #
 # [ai_hosts:children]
 # desktops
@@ -25,25 +49,3 @@ localhost ansible_connection=local
 
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
-
-# --- AMD ROCm: HSA_OVERRIDE_GFX_VERSION ------------------------
-# Wird benötigt wenn /sys/module/amdgpu/version im Container fehlt
-# (Standard bei Podman – Kernel-Treiber läuft auf dem Host).
-# ROCm kann die GPU-Architektur sonst nicht ermitteln.
-#
-# Wert ermitteln (auf dem Host ausführen):
-#   rocminfo | grep 'Name:' | grep gfx
-#   Ausgabe z.B. "gfx1030" → Wert "10.3.0" (X.Y.Z aus gfxXYZ)
-#
-# Häufige Werte:
-#   gfx1010 → 10.1.0  (RX 5700 XT,  RDNA1)
-#   gfx1030 → 10.3.0  (RX 6800/6900 XT, RDNA2)
-#   gfx1031 → 10.3.1  (RX 6750 XT,  RDNA2)
-#   gfx1032 → 10.3.2  (RX 6600 XT,  RDNA2)
-#   gfx1100 → 11.0.0  (RX 7900 XTX, RDNA3)
-#   gfx1101 → 11.0.1  (RX 7800 XT,  RDNA3)
-#
-# Leer lassen (amd_gfx_version=) wenn kein Podman-Container
-# oder ROCm die GPU nativ erkennt.
-# ---------------------------------------------------------------
-amd_gfx_version=10.3.0
