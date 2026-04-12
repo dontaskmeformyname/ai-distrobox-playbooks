@@ -1,1 +1,12 @@
-localhost ansible_connection=local
+# Beispiel-Inventory für Remote-Ausführung per SSH
+
+[desktops]
+ws-a ansible_host=192.168.1.10 ansible_user=alex
+ws-b ansible_host=192.168.1.11 ansible_user=alex
+
+[servers]
+ai-01 ansible_host=192.168.1.20 ansible_user=alex
+ai-02 ansible_host=192.168.1.21 ansible_user=alex
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
