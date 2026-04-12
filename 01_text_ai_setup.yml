@@ -70,7 +70,7 @@
 
     - name: "AMD GPUs per lspci auflisten"
       ansible.builtin.shell:
-        # Klasse zuerst filtern, dann AMD/Radeon – verhindert die 41-Treffer durch
+        # Klasse zuerst filtern, dann AMD/Radeon – verhindert False Positives durch
         # AMD-CPU, Chipsatz-Brücken, NVMe-Controller etc.
         cmd: >-
           lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
@@ -298,7 +298,7 @@
     - name: "Erforderliche Basis-Pakete installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }}
-        apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip
+        apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip supervisor
       changed_when: true
 
     - name: "Keyrings Verzeichnis erstellen"
@@ -331,7 +331,7 @@
 
     - name: "APT-Pinning fuer ROCm einrichten"
       # Pin-Priority 600: AMD-Repo gewinnt bei ROCm-Paketen gegen Ubuntu noble.
-      # Dadurch loeost apt Abhaengigkeiten vollstaendig aus dem ROCm-Repo auf
+      # Dadurch löst apt Abhängigkeiten vollständig aus dem ROCm-Repo auf
       # ohne hold oder --allow-downgrades.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
@@ -378,19 +378,66 @@
       when: ollama_check.rc != 0
       changed_when: true
 
-    - name: "Pruefen ob ollama serve bereits laeuft"
+    - name: "Open WebUI ueber pip installieren"
+      ansible.builtin.command: >-
+        podman exec -u root {{ container_name }}
+        pip3 install open-webui --break-system-packages
+      register: webui_install
+      changed_when: "'Successfully installed' in webui_install.stdout"
+
+    - name: "Supervisor-Konfiguration fuer Ollama und Open WebUI schreiben"
+      # supervisord übernimmt PID 1 im Container und startet beide Dienste
+      # automatisch – auch nach einem Container-Neustart via `podman start`.
+      # restart=true stellt sicher dass die Konfig bei jedem Playbook-Lauf
+      # aktualisiert wird (idempotent durch Dateiinhalt-Vergleich).
+      ansible.builtin.command: >-
+        podman exec -u root {{ container_name }} bash -c
+        "mkdir -p /etc/supervisor/conf.d && cat > /etc/supervisor/conf.d/ai-box.conf << 'EOF'
+[supervisord]
+nodaemon=false
+logfile=/data/supervisord.log
+pidfile=/var/run/supervisord.pid
+
+[program:ollama]
+command=ollama serve
+autostart=true
+autorestart=true
+startretries=5
+stdout_logfile=/data/ollama.log
+stderr_logfile=/data/ollama.err
+
+[program:open-webui]
+command=open-webui serve
+autostart=true
+autorestart=true
+startretries=5
+startsecs=15
+stdout_logfile=/data/webui.log
+stderr_logfile=/data/webui.err
+EOF"
+      changed_when: true
+
+    - name: "Laufenden supervisord neu laden (falls aktiv)"
       ansible.builtin.command: >-
         podman exec {{ container_name }} bash -c
-        "curl -sf http://localhost:11434/api/tags > /dev/null"
-      register: ollama_running
+        "supervisorctl reread && supervisorctl update"
+      register: supervisord_reload
+      failed_when: false
+      changed_when: supervisord_reload.rc == 0
+
+    - name: "Pruefen ob supervisord bereits laeuft"
+      ansible.builtin.command: >-
+        podman exec {{ container_name }} bash -c
+        "pgrep -x supervisord > /dev/null"
+      register: supervisord_running
       failed_when: false
       changed_when: false
 
-    - name: "ollama serve im Hintergrund starten"
+    - name: "supervisord starten (startet Ollama + Open WebUI automatisch)"
       ansible.builtin.command: >-
         podman exec -d {{ container_name }} bash -c
-        "nohup ollama serve > /data/ollama.log 2>&1"
-      when: ollama_running.rc != 0
+        "supervisord -c /etc/supervisor/supervisord.conf"
+      when: supervisord_running.rc != 0
       changed_when: true
 
     - name: "Warten bis ollama serve bereit ist (max 30s)"
@@ -401,14 +448,19 @@
       until: ollama_ready.rc == 0
       retries: 10
       delay: 3
-      when: ollama_running.rc != 0
       changed_when: false
 
-    - name: "Open WebUI ueber pip installieren"
+    - name: "Warten bis Open WebUI bereit ist (max 60s)"
+      # Open WebUI braucht beim ersten Start länger (~30s) für DB-Migration
+      # und das Laden der Python-Module.
       ansible.builtin.command: >-
-        podman exec -u root {{ container_name }}
-        pip3 install open-webui --break-system-packages
-      changed_when: true
+        podman exec {{ container_name }} bash -c
+        "curl -sf http://localhost:8080 > /dev/null"
+      register: webui_ready
+      until: webui_ready.rc == 0
+      retries: 20
+      delay: 3
+      changed_when: false
 
 - name: "systemd User-Service und Desktop-Integration"
   hosts: ai_hosts
@@ -427,6 +479,8 @@
         mode: "0755"
 
     - name: "systemd User-Service fuer ai-box erstellen"
+      # ExecStartPost wartet kurz und startet dann supervisord im Container –
+      # so laufen Ollama und Open WebUI direkt nach `podman start` wieder.
       ansible.builtin.copy:
         dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
         mode: "0644"
@@ -438,6 +492,7 @@
           [Service]
           Type=simple
           ExecStart=podman start -a {{ container_name }}
+          ExecStartPost=/bin/sh -c 'sleep 2 && podman exec -d {{ container_name }} supervisord -c /etc/supervisor/supervisord.conf'
           ExecStop=podman stop {{ container_name }}
           Restart=on-failure
           RestartSec=5
@@ -513,5 +568,9 @@
           - "  → Open WebUI:      http://localhost:{{ webui_port }}"
           - "  → Ollama API:      http://localhost:{{ ollama_port }}"
           - ""
+          - "  Logs im Container:"
+          - "    podman exec ai-box tail -f /data/webui.log"
+          - "    podman exec ai-box tail -f /data/ollama.log"
+          - ""
           - "  Erstes Modell laden:"
-          - "  podman exec {{ container_name }} ollama pull llama3.2"
+          - "  podman exec ai-box ollama pull llama3.2"
