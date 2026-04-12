@@ -292,20 +292,21 @@
       when: gpu_amd | default(false) | bool
       changed_when: true
 
-    - name: "Ubuntu-Pakete sperren die mit ROCm kollidieren (apt-mark hold)"
-      # Ubuntu 24.04 Noble liefert rocminfo 5.7.1 und rocm-cmake 6.0.0 mit.
-      # Das ROCm-Repo erwartet exakt seine eigenen Versionen dieser Pakete.
-      # Loesung: Ubuntu-Versionen auf hold setzen, damit apt downgraden kann.
+    - name: "APT-Pinning fuer ROCm einrichten"
+      # Pin-Priority 600: AMD-Repo gewinnt bei ROCm-Paketen gegen Ubuntu noble.
+      # Dadurch loeost apt Abhaengigkeiten vollstaendig aus dem ROCm-Repo auf
+      # ohne hold oder --allow-downgrades.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
-        "apt-mark hold rocminfo rocm-cmake rocm-hip-sdk rocm-hip-runtime 2>/dev/null || true"
+        "printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n'
+        > /etc/apt/preferences.d/rocm-pin-600"
       when: gpu_amd | default(false) | bool
       changed_when: true
 
-    - name: "AMD ROCm installieren (mit allow-downgrades)"
+    - name: "AMD ROCm installieren"
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
-        "apt-get install -y --allow-downgrades rocm"
+        "apt-get install -y rocm"
       when: gpu_amd | default(false) | bool
       async: 3600
       poll: 15
