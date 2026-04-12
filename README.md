@@ -70,7 +70,7 @@ ansible -i inventory ai_hosts --list-hosts
 ## GPU manuell identifizieren
 
 Die GPU-Erkennung erfolgt automatisch via `lspci` auf dem **Host** (nicht im Container).
-Falls das System mehrere GPUs hat oder die Erkennung nicht korrekt greift, kann die GPU manuell angegeben werden.
+Bei mehreren GPUs im System wird zu Beginn eine Liste aller gefundenen GPUs ausgegeben.
 
 ### Alle GPUs im System anzeigen
 
@@ -82,6 +82,9 @@ lspci | grep -E 'VGA|3D|Display'
 lspci | grep -i nvidia          # NVIDIA
 lspci | grep -i amd             # AMD / Radeon
 lspci | grep -iE 'intel.*(graphics|vga|uhd|iris|arc)'  # Intel
+
+# DRI Render-Nodes anzeigen (AMD/Intel, Index 0, 1, 2 ...)
+ls -1 /dev/dri/renderD*
 ```
 
 Beispielausgabe mit zwei GPUs (iGPU + dGPU):
@@ -94,23 +97,57 @@ Beispielausgabe mit zwei GPUs (iGPU + dGPU):
 ### Manuelle GPU-Auswahl
 
 Bei mehreren GPUs im System oder falls die automatische Erkennung fehlschlägt,
-kann die gewünschte GPU über die Variable `gpu_override` festgelegt werden.
+kann die gewünschte GPU über `gpu_override` festgelegt werden.
+
+Das Format ist `hersteller` oder `hersteller:index` (Index beginnt bei 0):
+
+| Wert | Bedeutung |
+|---|---|
+| `""` | Automatisch (Standard) |
+| `amd` | Erste AMD GPU (Index 0) |
+| `amd:0` | Erste AMD GPU (explizit) |
+| `amd:1` | Zweite AMD GPU |
+| `nvidia` | Erste NVIDIA GPU (Index 0) |
+| `nvidia:1` | Zweite NVIDIA GPU |
+| `intel` | Intel GPU |
+| `cpu` | CPU-only, keine GPU |
 
 **Option 1 – direkt in `01_text_ai_setup.yml` unter `vars`:**
 
 ```yaml
 vars:
-  gpu_override: "amd"   # nvidia | amd | intel | cpu | "" (= automatisch)
+  gpu_override: "amd:1"   # zweite AMD GPU verwenden
 ```
 
 **Option 2 – per CLI ohne Datei zu ändern:**
 
 ```bash
+# Erste AMD GPU (Standard bei einem AMD-System)
 ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=amd
+
+# Zweite AMD GPU (z.B. RX 6900 XT wenn iGPU auf Index 0 liegt)
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=amd:1
+
+# Erste NVIDIA GPU
 ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=nvidia
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=intel
+
+# Zweite NVIDIA GPU
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=nvidia:1
+
+# CPU-only erzwingen
 ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=cpu
 ```
+
+### Mehrere GPUs – Priorität bei automatischer Erkennung
+
+Wenn mehrere GPU-Hersteller erkannt werden (z.B. Intel iGPU + AMD dGPU),
+gelten folgende Prioritäten:
+
+```
+NVIDIA > AMD > Intel > CPU-only
+```
+
+Das Playbook gibt in diesem Fall eine Warnung aus und empfiehlt `gpu_override`.
 
 ## Unterstützte GPUs
 
@@ -130,7 +167,7 @@ Die benötigten Treiber/Bibliotheken werden entsprechend im Container installier
 - Podman installiert (`podman --version`)
 - Ansible installiert (`ansible --version`)
 - `pciutils` installiert (`lspci` muss verfügbar sein)
-- Für AMD: `/dev/kfd` und `/dev/dri` vorhanden (AMDGPU-Treiber geladen)
+- Für AMD: `/dev/kfd` und `/dev/dri/renderD*` vorhanden (AMDGPU-Treiber geladen)
 - Für NVIDIA: NVIDIA Container Toolkit installiert
 - Für Intel: `/dev/dri/renderD128` vorhanden
 
@@ -205,4 +242,4 @@ ssh -L 8080:localhost:8080 -L 11434:localhost:11434 user@server
 | `webui_port` | `8080` | Open WebUI Port |
 | `amd_gfx_version` | `11.0.0` | AMD GPU GFX-Version für ROCm |
 | `data_dir` | `~/.local/share/ai-box` | Persistentes Datenverzeichnis |
-| `gpu_override` | `""` (auto) | GPU manuell festlegen: `nvidia`, `amd`, `intel`, `cpu` |
+| `gpu_override` | `""` (auto) | GPU auswählen: `amd`, `amd:1`, `nvidia`, `nvidia:1`, `intel`, `cpu` |
