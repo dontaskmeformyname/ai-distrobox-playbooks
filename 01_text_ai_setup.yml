@@ -265,6 +265,15 @@
         - not gpu_amd
         - not gpu_intel
 
+    - name: "Container starten falls gestoppt"
+      ansible.builtin.command: podman start {{ container_name }}
+      register: container_start
+      # rc=0: Container wurde gestartet
+      # rc=125: Container läuft bereits – kein Fehler
+      failed_when: container_start.rc not in [0, 125]
+      changed_when: container_start.rc == 0
+      when: container_exists.rc == 0
+
 - name: "Text-KI Setup innerhalb des Podman Containers"
   hosts: ai_hosts
   become: false
