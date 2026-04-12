@@ -27,7 +27,7 @@
     device:
       - "nvidia.com/gpu={{ nvidia_gpu_index | default(0) }}"
     env:
-      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_KEEP_ALIVE: "-1"
       CUDA_VISIBLE_DEVICES: "{{ nvidia_gpu_index | default(0) }}"
       DATA_DIR: /data
   when:
@@ -52,10 +52,10 @@
       - "{{ amd_render_node | default('/dev/dri/renderD128') }}"
     group_add: [render, video]
     env: >-
-      {{ {'OLLAMA_KEEP_ALIVE': '0', 'DATA_DIR': '/data',
+      {{ {'OLLAMA_KEEP_ALIVE': '-1', 'DATA_DIR': '/data',
           'HSA_OVERRIDE_GFX_VERSION': amd_gfx_version}
          if amd_gfx_version != ''
-         else {'OLLAMA_KEEP_ALIVE': '0', 'DATA_DIR': '/data'} }}
+         else {'OLLAMA_KEEP_ALIVE': '-1', 'DATA_DIR': '/data'} }}
   when:
     - container_exists.rc != 0
     - gpu_amd | bool
@@ -76,7 +76,7 @@
       - "{{ data_dir }}:/data:z"
     device: [/dev/dri]
     env:
-      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_KEEP_ALIVE: "-1"
       DATA_DIR: /data
   when:
     - container_exists.rc != 0
@@ -98,7 +98,7 @@
     volumes:
       - "{{ data_dir }}:/data:z"
     env:
-      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_KEEP_ALIVE: "-1"
       DATA_DIR: /data
   when:
     - container_exists.rc != 0
