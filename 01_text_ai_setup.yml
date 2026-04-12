@@ -3,33 +3,19 @@
 # Unterstützte GPUs : NVIDIA (CUDA), AMD (ROCm), Intel (oneAPI)
 # Headless-Server  : Desktop-Integration wird übersprungen
 # Desktop          : systemd User-Service + .desktop-Eintrag
-# Zielauswahl      : gruppenagnostisch über Inventory + --limit
-# Schutz           : Multi-Host-Läufe nur mit -e allow_multi_host=true
-# Ausführen mit    : ansible-playbook -i inventory 01_text_ai_setup.yml --limit <host|gruppe> --ask-become-pass
+# Zielauswahl      : Standard ai_hosts, einschränkbar über --limit
+# Ausführen mit    : ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
 # ==============================================================
 
 - name: GPU-Erkennung & Podman-Vorbereitung
-  hosts: all
-  serial: 1
+  hosts: ai_hosts
   become: false
 
   vars:
-    allow_multi_host: false
     container_name: "ai-box"
     ollama_port: "11434"
     webui_port: "8080"
     data_dir: "{{ ansible_env.HOME }}/.local/share/ai-box"
-
-  pre_tasks:
-    - name: Schutz gegen versehentliche Multi-Host-Ausführung
-      ansible.builtin.assert:
-        that:
-          - allow_multi_host | bool or (ansible_play_hosts_all | length) == 1
-        fail_msg: >-
-          Dieses Playbook verweigert die Ausführung auf mehreren Hosts.
-          Nutze --limit <host|gruppe> oder -e allow_multi_host=true.
-        success_msg: Zielmenge ist freigegeben.
-      run_once: true
 
   tasks:
     - name: NVIDIA GPU prüfen (nvidia-smi)
@@ -184,8 +170,7 @@
         - not gpu_intel
 
 - name: Text-KI Setup innerhalb des Podman Containers
-  hosts: all
-  serial: 1
+  hosts: ai_hosts
   become: false
   gather_facts: false
 
@@ -275,8 +260,7 @@
       changed_when: true
 
 - name: systemd User-Service + Desktop-Integration
-  hosts: all
-  serial: 1
+  hosts: ai_hosts
   become: false
 
   vars:

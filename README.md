@@ -5,31 +5,13 @@ Funktioniert sowohl auf einem **Headless-Server** als auch auf einem **Desktop-S
 
 ## Zielsysteme
 
-Das Playbook ist **gruppenagnostisch**.
-Es läuft auf beliebigen Hosts oder Gruppen aus dem Inventory und erwartet keine festen Gruppennamen im Playbook.
-Ansible stellt dafür die Gruppe `all` als Sammelgruppe für alle Inventory-Hosts bereit.
+Das Playbook läuft standardmäßig auf allen Hosts der Gruppe `ai_hosts`.
+Diese Gruppe ist im Inventory als Sammelgruppe definiert und kann beliebige Untergruppen enthalten.
+Über `--limit` kann die Ausführung auf einzelne Hosts oder Untergruppen eingeschränkt werden.
 
-## Sichere Ausführung
+## Inventory-Struktur
 
-Die Zielmenge wird über `--limit` eingeschränkt.
-Zusätzlich läuft das Playbook seriell mit `serial: 1`, damit Hosts nacheinander verarbeitet werden.
-Wenn mehr als ein Host betroffen ist, bricht das Playbook standardmäßig ab.
-Mehrere Hosts sind nur mit ausdrücklicher Freigabe über `-e allow_multi_host=true` erlaubt.
-
-### Beispiele
-
-```bash
-# Einzelner Host
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit gpu-1 --ask-become-pass
-
-# Einzelne Gruppe
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit servers --ask-become-pass -e allow_multi_host=true
-
-# Mehrere explizite Hosts
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit 'gpu-1,gpu-2' --ask-become-pass -e allow_multi_host=true
-```
-
-## Beispiel-Inventory
+Gruppen können über `:children` zu Mitgliedern anderer Gruppen werden:
 
 ```ini
 [desktops]
@@ -40,8 +22,49 @@ ws-b ansible_host=192.168.1.11 ansible_user=alex
 ai-01 ansible_host=192.168.1.20 ansible_user=alex
 ai-02 ansible_host=192.168.1.21 ansible_user=alex
 
+[ai_hosts:children]
+desktops
+servers
+
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
+```
+
+## Ausführung
+
+```bash
+# Alle Hosts in ai_hosts (Standard)
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
+
+# Einzelner Host
+ansible-playbook -i inventory 01_text_ai_setup.yml --limit gpu-1 --ask-become-pass
+
+# Einzelne Gruppe
+ansible-playbook -i inventory 01_text_ai_setup.yml --limit servers --ask-become-pass
+
+# Mehrere explizite Hosts
+ansible-playbook -i inventory 01_text_ai_setup.yml --limit 'gpu-1,gpu-2' --ask-become-pass
+```
+
+## Test-Ausführung
+
+Mit `--check` wird das Playbook im Trockenlauf ausgeführt – es werden keine Änderungen vorgenommen:
+
+```bash
+# Trockenlauf für alle ai_hosts
+ansible-playbook -i inventory 01_text_ai_setup.yml --check --ask-become-pass
+
+# Trockenlauf mit ausführlicher Ausgabe
+ansible-playbook -i inventory 01_text_ai_setup.yml --check --diff --ask-become-pass
+
+# Trockenlauf auf einzelnem Host
+ansible-playbook -i inventory 01_text_ai_setup.yml --check --limit gpu-1 --ask-become-pass
+
+# Nur Syntax prüfen (kein SSH-Zugriff nötig)
+ansible-playbook -i inventory 01_text_ai_setup.yml --syntax-check
+
+# Inventory und Gruppenmitgliedschaften anzeigen
+ansible -i inventory ai_hosts --list-hosts
 ```
 
 ## Unterstützte GPUs
@@ -69,10 +92,10 @@ Die benötigten Treiber/Bibliotheken werden entsprechend im Container installier
 
 ```bash
 # 1. Text-KI: Podman Container, GPU-Treiber, Ollama, Open WebUI
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit <host|gruppe> --ask-become-pass
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
 
 # 2. Bild-KI: ComfyUI + PyTorch (GPU-angepasst)
-ansible-playbook -i inventory 02_image_ai_setup.yml --limit <host|gruppe> --ask-become-pass
+ansible-playbook -i inventory 02_image_ai_setup.yml --ask-become-pass
 ```
 
 ## Was wird eingerichtet?
@@ -136,4 +159,3 @@ ssh -L 8080:localhost:8080 -L 11434:localhost:11434 user@server
 | `webui_port` | `8080` | Open WebUI Port |
 | `amd_gfx_version` | `11.0.0` | AMD GPU GFX-Version |
 | `data_dir` | `~/.local/share/ai-box` | Persistentes Datenverzeichnis |
-| `allow_multi_host` | `false` | Erlaubt bewusste Mehrfachausführung |
