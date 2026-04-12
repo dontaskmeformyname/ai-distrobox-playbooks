@@ -1,0 +1,102 @@
+---
+- name: "systemd User-Service Verzeichnis sicherstellen"
+  ansible.builtin.file:
+    path: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
+    state: directory
+    mode: "0755"
+
+- name: "systemd User-Service erstellen"
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=AI Box Podman Container (Ollama + Open WebUI)
+      After=default.target
+
+      [Service]
+      Type=simple
+      ExecStart=podman start -a {{ container_name }}
+      ExecStartPost=/bin/sh -c 'sleep 2 && podman exec -d {{ container_name }} supervisord -c /etc/supervisor/supervisord.conf'
+      ExecStop=podman stop {{ container_name }}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=default.target
+
+- name: "systemd User-Service aktivieren und starten"
+  ansible.builtin.systemd:
+    name: ai-box.service
+    state: started
+    enabled: true
+    scope: user
+    daemon_reload: true
+
+- name: "Lokales bin-Verzeichnis sicherstellen"
+  ansible.builtin.file:
+    path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
+    state: directory
+    mode: "0755"
+
+- name: "Launcher-Skript aus Template erzeugen"
+  ansible.builtin.template:
+    src: text-ki-start.j2
+    dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start"
+    mode: "0755"
+
+- name: "Lokales applications-Verzeichnis sicherstellen"
+  ansible.builtin.file:
+    path: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications"
+    state: directory
+    mode: "0755"
+  when: not (is_headless | default(true) | bool)
+
+- name: "Desktop-Eintrag erstellen"
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
+    mode: "0644"
+    content: |
+      [Desktop Entry]
+      Version=1.0
+      Type=Application
+      Name=Text KI
+      GenericName=Lokale Text-KI
+      Comment=Ollama und Open WebUI starten
+      Exec={{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start
+      Icon=text-editor
+      Terminal=false
+      Categories=Science;Education;
+      Keywords=AI;LLM;Ollama;
+      StartupNotify=true
+  when: not (is_headless | default(true) | bool)
+
+- name: "Desktop-Datenbank aktualisieren"
+  ansible.builtin.command:
+    cmd: update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
+  changed_when: false
+  failed_when: false
+  when: not (is_headless | default(true) | bool)
+
+- name: "Zusammenfassung"
+  ansible.builtin.debug:
+    msg:
+      - "╔════════════════════════════════════════════════════╗"
+      - "║  ✅  Text-KI Setup abgeschlossen!                  ║"
+      - "╚════════════════════════════════════════════════════╝"
+      - ""
+      - "  GPU: NVIDIA={{ gpu_nvidia }} AMD={{ gpu_amd }} Intel={{ gpu_intel }}"
+      - "  Auswahl: {{ gpu_override if gpu_override != '' else 'automatisch' }}"
+      - "  Modus: {{ 'Headless-Server' if is_headless else 'Desktop' }}"
+      - "  HF_TOKEN: {{ '✅ gesetzt' if hf_token | default('') != '' else '⚠️ nicht gesetzt – siehe secrets.yml.example' }}"
+      - ""
+      - "  → Dienste starten: systemctl --user start ai-box"
+      - "  → Open WebUI:      http://localhost:{{ webui_port }}"
+      - "  → Ollama API:      http://localhost:{{ ollama_port }}"
+      - ""
+      - "  Logs im Container:"
+      - "    podman exec ai-box tail -f /data/webui.log"
+      - "    podman exec ai-box tail -f /data/ollama.log"
+      - ""
+      - "  Erstes Modell laden:"
+      - "  podman exec ai-box ollama pull llama3.2"

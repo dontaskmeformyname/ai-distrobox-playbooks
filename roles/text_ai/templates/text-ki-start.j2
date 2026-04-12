@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Launcher für Text-KI (Ollama + Open WebUI)
+# Generiert von Ansible – nicht manuell bearbeiten.
+
+set -euo pipefail
+
+CONTAINER="{{ container_name }}"
+WEBUI_URL="http://localhost:{{ webui_port }}"
+OLLAMA_URL="http://localhost:{{ ollama_port }}"
+
+# Container starten falls nicht aktiv
+if ! podman container exists "$CONTAINER" 2>/dev/null; then
+  echo "Container $CONTAINER nicht gefunden. Bitte Playbook erneut ausführen."
+  exit 1
+fi
+
+if [ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]; then
+  echo "Starte Container $CONTAINER ..."
+  podman start "$CONTAINER"
+  sleep 2
+  podman exec -d "$CONTAINER" supervisord -c /etc/supervisor/supervisord.conf
+fi
+
+# Warten bis Open WebUI erreichbar ist
+echo "Warte auf Open WebUI ..."
+for i in $(seq 1 20); do
+  if curl -sf "$WEBUI_URL" > /dev/null 2>&1; then
+    break
+  fi
+  sleep 3
+done
+
+# Browser öffnen
+if command -v xdg-open &>/dev/null; then
+  xdg-open "$WEBUI_URL"
+elif command -v gio &>/dev/null; then
+  gio open "$WEBUI_URL"
+fi
+
+echo "Open WebUI: $WEBUI_URL"
+echo "Ollama API: $OLLAMA_URL"

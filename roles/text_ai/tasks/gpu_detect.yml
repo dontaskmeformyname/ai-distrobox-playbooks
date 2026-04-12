@@ -1,0 +1,139 @@
+---
+- name: "Alle GPUs per lspci auflisten"
+  ansible.builtin.shell:
+    cmd: >-
+      lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
+      | grep -iv 'non-volatile\|nvme\|storage\|memory controller'
+  register: gpu_list_all
+  failed_when: false
+  changed_when: false
+
+- name: "Gefundene GPUs anzeigen"
+  ansible.builtin.debug:
+    msg: "{{ gpu_list_all.stdout_lines if gpu_list_all.stdout_lines | length > 0 else ['Keine GPU erkannt'] }}"
+
+- name: "NVIDIA GPUs erkennen"
+  ansible.builtin.shell:
+    cmd: >-
+      lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
+      | grep -i nvidia
+  register: nvidia_lspci_check
+  failed_when: false
+  changed_when: false
+
+- name: "AMD GPUs erkennen"
+  ansible.builtin.shell:
+    cmd: >-
+      lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
+      | grep -iE 'amd|radeon|advanced micro devices'
+  register: amd_lspci_check
+  failed_when: false
+  changed_when: false
+
+- name: "Intel GPUs erkennen"
+  ansible.builtin.shell:
+    cmd: lspci | grep -iE 'intel.*(graphics|vga|display|uhd|iris|arc)'
+  register: intel_lspci_check
+  failed_when: false
+  changed_when: false
+
+- name: "GPU-Hersteller und Index aus gpu_override parsen"
+  ansible.builtin.set_fact:
+    _gpu_vendor: "{{ gpu_override.split(':')[0] if gpu_override != '' else '' }}"
+    _gpu_index:  "{{ gpu_override.split(':')[1] | int if ':' in gpu_override else 0 }}"
+
+- name: "GPU-Flags setzen"
+  ansible.builtin.set_fact:
+    gpu_nvidia: "{{ (_gpu_vendor == 'nvidia') or (_gpu_vendor == '' and nvidia_lspci_check.rc == 0) }}"
+    gpu_amd:    "{{ (_gpu_vendor == 'amd')    or (_gpu_vendor == '' and amd_lspci_check.rc == 0) }}"
+    gpu_intel:  "{{ (_gpu_vendor == 'intel')  or (_gpu_vendor == '' and intel_lspci_check.rc == 0) }}"
+
+- name: "AMD DRI-Node für gewählten Index ermitteln"
+  ansible.builtin.shell:
+    cmd: "ls /dev/dri/renderD* 2>/dev/null | sort | sed -n '{{ (_gpu_index | int) + 1 }}p'"
+  register: amd_dri_node
+  when: gpu_amd
+  failed_when: false
+  changed_when: false
+
+- name: "AMD DRI-Node setzen (Fallback renderD128)"
+  ansible.builtin.set_fact:
+    amd_render_node: "{{ amd_dri_node.stdout | default('/dev/dri/renderD128') | trim }}"
+  when: gpu_amd
+
+- name: "NVIDIA GPU-Index setzen"
+  ansible.builtin.set_fact:
+    nvidia_gpu_index: "{{ _gpu_index }}"
+  when: gpu_nvidia
+
+- name: "GPU-Ergebnis anzeigen"
+  ansible.builtin.debug:
+    msg: >-
+      GPU-Erkennung: NVIDIA={{ gpu_nvidia }} AMD={{ gpu_amd }} Intel={{ gpu_intel }}
+      {{ '(manuell: ' + gpu_override + ')' if gpu_override != '' else '(automatisch via lspci)' }}
+
+- name: "Warnung – mehrere GPU-Hersteller erkannt"
+  ansible.builtin.debug:
+    msg: >
+      ⚠️  Mehrere GPU-Hersteller erkannt!
+      Aktive Priorität: {{ 'NVIDIA' if gpu_nvidia else 'AMD' if gpu_amd else 'Intel' }}.
+      Tipp: -e gpu_override=amd:0
+  when: (gpu_nvidia | bool | int) + (gpu_amd | bool | int) + (gpu_intel | bool | int) > 1
+
+- name: "Warnung – mehrere NVIDIA GPUs"
+  ansible.builtin.debug:
+    msg: >
+      ⚠️  {{ nvidia_lspci_check.stdout_lines | length }} NVIDIA GPUs gefunden.
+      Aktiv: Index {{ nvidia_gpu_index | default(0) }}. Tipp: -e gpu_override=nvidia:1
+  when:
+    - gpu_nvidia
+    - nvidia_lspci_check.stdout_lines | length > 1
+
+- name: "Warnung – mehrere AMD GPUs"
+  ansible.builtin.debug:
+    msg: >
+      ⚠️  {{ amd_lspci_check.stdout_lines | length }} AMD GPUs gefunden.
+      Aktiv: {{ amd_render_node | default('/dev/dri/renderD128') }} (Index {{ _gpu_index }}).
+      Tipp: -e gpu_override=amd:1
+  when:
+    - gpu_amd
+    - amd_lspci_check.stdout_lines | length > 1
+
+- name: "Warnung – keine GPU, CPU-only Modus"
+  ansible.builtin.debug:
+    msg: "⚠️ Keine GPU erkannt – Ollama läuft im CPU-only Modus."
+  when: not gpu_nvidia and not gpu_amd and not gpu_intel
+
+- name: "Headless-Modus erkennen"
+  ansible.builtin.set_fact:
+    is_headless: >-
+      {{ (ansible_facts['env'].get('DISPLAY', '') == '') and
+         (ansible_facts['env'].get('WAYLAND_DISPLAY', '') == '') }}
+
+- name: "Modus anzeigen"
+  ansible.builtin.debug:
+    msg: "{{ 'Headless-Server – Desktop-Integration wird übersprungen.' if is_headless else 'Desktop – Desktop-Integration wird eingerichtet.' }}"
+
+- name: "User zur render-Gruppe hinzufügen (AMD/Intel)"
+  ansible.builtin.user:
+    name: "{{ ansible_facts['user_id'] }}"
+    groups: render
+    append: true
+  become: true
+  when: gpu_amd or gpu_intel
+
+- name: "User zur video-Gruppe hinzufügen"
+  ansible.builtin.user:
+    name: "{{ ansible_facts['user_id'] }}"
+    groups: video
+    append: true
+  become: true
+
+- name: "Gruppenrechte für /dev/kfd setzen (AMD)"
+  ansible.builtin.file:
+    path: /dev/kfd
+    group: render
+    mode: "0660"
+  become: true
+  ignore_errors: true
+  when: gpu_amd

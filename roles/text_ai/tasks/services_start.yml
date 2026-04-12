@@ -1,0 +1,30 @@
+---
+- name: "Prüfen ob supervisord bereits läuft"
+  ansible.builtin.command:
+    cmd: podman exec {{ container_name }} pgrep -x supervisord
+  register: supervisord_running
+  failed_when: false
+  changed_when: false
+
+- name: "supervisord starten"
+  ansible.builtin.command:
+    cmd: podman exec -d {{ container_name }} supervisord -c /etc/supervisor/supervisord.conf
+  when: supervisord_running.rc != 0
+
+- name: "Warten bis Ollama bereit ist (max 30s)"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ollama_port }}/api/tags"
+    status_code: 200
+  register: ollama_ready
+  until: ollama_ready.status == 200
+  retries: 10
+  delay: 3
+
+- name: "Warten bis Open WebUI bereit ist (max 60s)"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ webui_port }}"
+    status_code: 200
+  register: webui_ready
+  until: webui_ready.status == 200
+  retries: 20
+  delay: 3

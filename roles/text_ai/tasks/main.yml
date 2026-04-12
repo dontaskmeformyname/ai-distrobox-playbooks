@@ -1,0 +1,6 @@
+---
+# Dieser Einstiegspunkt wird nicht direkt verwendet.
+# Das Top-Level-Playbook ruft die einzelnen task-Dateien
+# per tasks_from: explizit auf.
+- ansible.builtin.fail:
+    msg: "Bitte tasks_from: in include_role verwenden, nicht main.yml direkt."

@@ -1,0 +1,113 @@
+---
+- name: "Datenverzeichnis anlegen"
+  ansible.builtin.file:
+    path: "{{ data_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: "Prüfen ob Container bereits existiert"
+  ansible.builtin.command: podman container exists {{ container_name }}
+  register: container_exists
+  failed_when: false
+  changed_when: false
+
+- name: "Container anlegen (NVIDIA)"
+  containers.podman.podman_container:
+    name: "{{ container_name }}"
+    image: ubuntu:24.04
+    state: started
+    command: sleep infinity
+    detach: true
+    security_opt: [label=disable]
+    ports:
+      - "{{ ollama_port }}:11434"
+      - "{{ webui_port }}:8080"
+    volumes:
+      - "{{ data_dir }}:/data:z"
+    device:
+      - "nvidia.com/gpu={{ nvidia_gpu_index | default(0) }}"
+    env:
+      OLLAMA_KEEP_ALIVE: "0"
+      CUDA_VISIBLE_DEVICES: "{{ nvidia_gpu_index | default(0) }}"
+      DATA_DIR: /data
+  when:
+    - container_exists.rc != 0
+    - gpu_nvidia | bool
+
+- name: "Container anlegen (AMD)"
+  containers.podman.podman_container:
+    name: "{{ container_name }}"
+    image: ubuntu:24.04
+    state: started
+    command: sleep infinity
+    detach: true
+    security_opt: [label=disable]
+    ports:
+      - "{{ ollama_port }}:11434"
+      - "{{ webui_port }}:8080"
+    volumes:
+      - "{{ data_dir }}:/data:z"
+    device:
+      - /dev/kfd
+      - "{{ amd_render_node | default('/dev/dri/renderD128') }}"
+    group_add: [render, video]
+    env: >-
+      {{ {'OLLAMA_KEEP_ALIVE': '0', 'DATA_DIR': '/data',
+          'HSA_OVERRIDE_GFX_VERSION': amd_gfx_version}
+         if amd_gfx_version != ''
+         else {'OLLAMA_KEEP_ALIVE': '0', 'DATA_DIR': '/data'} }}
+  when:
+    - container_exists.rc != 0
+    - gpu_amd | bool
+    - not gpu_nvidia | bool
+
+- name: "Container anlegen (Intel)"
+  containers.podman.podman_container:
+    name: "{{ container_name }}"
+    image: ubuntu:24.04
+    state: started
+    command: sleep infinity
+    detach: true
+    security_opt: [label=disable]
+    ports:
+      - "{{ ollama_port }}:11434"
+      - "{{ webui_port }}:8080"
+    volumes:
+      - "{{ data_dir }}:/data:z"
+    device: [/dev/dri]
+    env:
+      OLLAMA_KEEP_ALIVE: "0"
+      DATA_DIR: /data
+  when:
+    - container_exists.rc != 0
+    - gpu_intel | bool
+    - not gpu_nvidia | bool
+    - not gpu_amd | bool
+
+- name: "Container anlegen (CPU-only)"
+  containers.podman.podman_container:
+    name: "{{ container_name }}"
+    image: ubuntu:24.04
+    state: started
+    command: sleep infinity
+    detach: true
+    security_opt: [label=disable]
+    ports:
+      - "{{ ollama_port }}:11434"
+      - "{{ webui_port }}:8080"
+    volumes:
+      - "{{ data_dir }}:/data:z"
+    env:
+      OLLAMA_KEEP_ALIVE: "0"
+      DATA_DIR: /data
+  when:
+    - container_exists.rc != 0
+    - not gpu_nvidia | bool
+    - not gpu_amd | bool
+    - not gpu_intel | bool
+
+- name: "Container starten falls gestoppt"
+  containers.podman.podman_container:
+    name: "{{ container_name }}"
+    state: started
+  when: container_exists.rc == 0

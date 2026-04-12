@@ -1,0 +1,8 @@
+---
+- name: supervisord neu laden
+  ansible.builtin.command:
+    cmd: supervisorctl reread && supervisorctl update
+  failed_when: false
+  vars:
+    ansible_connection: containers.podman.podman
+    ansible_podman_container: "{{ container_name }}"

@@ -1,0 +1,161 @@
+---
+# Dieses Task-File läuft mit:
+#   hosts: ai_box_container
+#   connection: containers.podman.podman  (gesetzt via add_host)
+#
+# Alle ansible.builtin.*-Module arbeiten direkt im Container.
+
+# -- APT-Basis ----------------------------------------------------------------
+- name: "APT-Cache aktualisieren"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "Basis-Pakete installieren"
+  # ffmpeg: von Open WebUI für Whisper-Spracheingabe benötigt
+  # supervisor: Prozessmanager für Ollama + Open WebUI
+  ansible.builtin.apt:
+    name:
+      - curl
+      - wget
+      - gpg
+      - ca-certificates
+      - zstd
+      - python3
+      - python3-pip
+      - supervisor
+      - ffmpeg
+    state: present
+
+- name: "Keyrings-Verzeichnis anlegen"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+# -- NVIDIA CUDA --------------------------------------------------------------
+- name: "NVIDIA CUDA Keyring herunterladen"
+  ansible.builtin.get_url:
+    url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+    dest: /tmp/cuda-keyring.deb
+    mode: "0644"
+  when: gpu_nvidia | default(false) | bool
+
+- name: "NVIDIA CUDA Keyring installieren"
+  ansible.builtin.apt:
+    deb: /tmp/cuda-keyring.deb
+  when: gpu_nvidia | default(false) | bool
+
+- name: "APT-Cache nach CUDA-Repo aktualisieren"
+  ansible.builtin.apt:
+    update_cache: true
+  when: gpu_nvidia | default(false) | bool
+
+# -- AMD ROCm -----------------------------------------------------------------
+- name: "AMD ROCm GPG-Key als Keyring speichern"
+  ansible.builtin.shell:
+    cmd: curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg
+    creates: /etc/apt/keyrings/rocm.gpg
+  when: gpu_amd | default(false) | bool
+
+- name: "AMD ROCm APT-Repository einrichten"
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main"
+    state: present
+    filename: rocm
+    update_cache: true
+  when: gpu_amd | default(false) | bool
+
+- name: "APT-Pinning für ROCm"
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/rocm-pin-600
+    mode: "0644"
+    content: |
+      Package: *
+      Pin: release o=repo.radeon.com
+      Pin-Priority: 600
+  when: gpu_amd | default(false) | bool
+
+- name: "AMD ROCm installieren"
+  ansible.builtin.apt:
+    name: rocm
+    state: present
+  when: gpu_amd | default(false) | bool
+  async: 3600
+  poll: 15
+
+# -- Intel oneAPI -------------------------------------------------------------
+- name: "Intel GPU GPG-Key als Keyring speichern"
+  ansible.builtin.shell:
+    cmd: curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor > /etc/apt/keyrings/intel-graphics.gpg
+    creates: /etc/apt/keyrings/intel-graphics.gpg
+  when: gpu_intel | default(false) | bool
+
+- name: "Intel GPU APT-Repository einrichten"
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble client"
+    state: present
+    filename: intel-gpu
+    update_cache: true
+  when: gpu_intel | default(false) | bool
+
+- name: "Intel Level Zero installieren"
+  ansible.builtin.apt:
+    name:
+      - intel-opencl-icd
+      - intel-level-zero-gpu
+      - level-zero
+    state: present
+  when: gpu_intel | default(false) | bool
+
+# -- Ollama -------------------------------------------------------------------
+- name: "Prüfen ob Ollama bereits installiert ist"
+  ansible.builtin.stat:
+    path: /usr/local/bin/ollama
+  register: ollama_bin
+
+- name: "Ollama Install-Skript herunterladen"
+  ansible.builtin.get_url:
+    url: https://ollama.com/install.sh
+    dest: /tmp/ollama-install.sh
+    mode: "0755"
+  when: not ollama_bin.stat.exists
+
+- name: "Ollama installieren"
+  ansible.builtin.command:
+    cmd: /tmp/ollama-install.sh
+    creates: /usr/local/bin/ollama
+  when: not ollama_bin.stat.exists
+
+# -- Open WebUI ---------------------------------------------------------------
+- name: "Open WebUI per pip installieren"
+  ansible.builtin.pip:
+    name: open-webui
+    state: present
+    extra_args: "--break-system-packages"
+
+# -- Supervisor-Konfiguration -------------------------------------------------
+- name: "Supervisor conf.d-Verzeichnis anlegen"
+  ansible.builtin.file:
+    path: /etc/supervisor/conf.d
+    state: directory
+    mode: "0755"
+
+- name: "Supervisor-Konfiguration schreiben"
+  # Gesetzte Umgebungsvariablen für open-webui:
+  #   HF_TOKEN          – HuggingFace Token (optional, aus secrets.yml)
+  #   CORS_ALLOW_ORIGIN – auf localhost beschränken (kein offenes *)
+  #   USER_AGENT        – identifiziert LangChain-HTTP-Requests
+  #   PYTHONUNBUFFERED  – Logs ohne Pufferung
+  ansible.builtin.template:
+    src: ai-box-supervisor.conf.j2
+    dest: /etc/supervisor/conf.d/ai-box.conf
+    mode: "0644"
+  no_log: true
+  notify: supervisord neu laden
+
+handlers:
+  - name: supervisord neu laden
+    ansible.builtin.command:
+      cmd: supervisorctl reread && supervisorctl update
+    failed_when: false
