@@ -67,16 +67,61 @@ ansible-playbook -i inventory 01_text_ai_setup.yml --syntax-check
 ansible -i inventory ai_hosts --list-hosts
 ```
 
+## GPU manuell identifizieren
+
+Die GPU-Erkennung erfolgt automatisch via `lspci` auf dem **Host** (nicht im Container).
+Falls das System mehrere GPUs hat oder die Erkennung nicht korrekt greift, kann die GPU manuell angegeben werden.
+
+### Alle GPUs im System anzeigen
+
+```bash
+# Alle Grafikkarten anzeigen (VGA, 3D, Display Controller)
+lspci | grep -E 'VGA|3D|Display'
+
+# Nach Hersteller filtern
+lspci | grep -i nvidia          # NVIDIA
+lspci | grep -i amd             # AMD / Radeon
+lspci | grep -iE 'intel.*(graphics|vga|uhd|iris|arc)'  # Intel
+```
+
+Beispielausgabe mit zwei GPUs (iGPU + dGPU):
+
+```
+00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 630
+01:00.0 VGA compatible controller: Advanced Micro Devices [AMD] Navi 21 [Radeon RX 6900 XT]
+```
+
+### Manuelle GPU-Auswahl
+
+Bei mehreren GPUs im System oder falls die automatische Erkennung fehlschlägt,
+kann die gewünschte GPU über die Variable `gpu_override` festgelegt werden.
+
+**Option 1 – direkt in `01_text_ai_setup.yml` unter `vars`:**
+
+```yaml
+vars:
+  gpu_override: "amd"   # nvidia | amd | intel | cpu | "" (= automatisch)
+```
+
+**Option 2 – per CLI ohne Datei zu ändern:**
+
+```bash
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=amd
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=nvidia
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=intel
+ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=cpu
+```
+
 ## Unterstützte GPUs
 
 | GPU-Hersteller | Beschleunigung | Erkennungsmethode |
 |---|---|---|
-| NVIDIA | CUDA | `nvidia-smi` |
-| AMD | ROCm | `rocminfo` |
-| Intel | oneAPI / Level Zero | `/dev/dri` + Vendor-ID |
+| NVIDIA | CUDA | `lspci` (grep nvidia) |
+| AMD | ROCm | `lspci` (grep amd/radeon) |
+| Intel | oneAPI / Level Zero | `lspci` (grep intel graphics) |
 | Kein GPU | CPU-only Fallback | automatisch |
 
-Die GPU-Erkennung erfolgt **vollautomatisch** zu Beginn des Playbooks.
+Die GPU-Erkennung erfolgt **vollautomatisch** zu Beginn des Playbooks auf dem Host.
 Die benötigten Treiber/Bibliotheken werden entsprechend im Container installiert.
 
 ## System-Voraussetzungen
@@ -84,8 +129,9 @@ Die benötigten Treiber/Bibliotheken werden entsprechend im Container installier
 - Linux-Host (x86_64)
 - Podman installiert (`podman --version`)
 - Ansible installiert (`ansible --version`)
-- Für AMD: `rocminfo` verfügbar, `/dev/kfd` vorhanden
-- Für NVIDIA: `nvidia-smi` verfügbar, NVIDIA Container Toolkit installiert
+- `pciutils` installiert (`lspci` muss verfügbar sein)
+- Für AMD: `/dev/kfd` und `/dev/dri` vorhanden (AMDGPU-Treiber geladen)
+- Für NVIDIA: NVIDIA Container Toolkit installiert
 - Für Intel: `/dev/dri/renderD128` vorhanden
 
 ## Installation
@@ -157,5 +203,6 @@ ssh -L 8080:localhost:8080 -L 11434:localhost:11434 user@server
 | `container_name` | `ai-box` | Name des Podman-Containers |
 | `ollama_port` | `11434` | Ollama API Port |
 | `webui_port` | `8080` | Open WebUI Port |
-| `amd_gfx_version` | `11.0.0` | AMD GPU GFX-Version |
+| `amd_gfx_version` | `11.0.0` | AMD GPU GFX-Version für ROCm |
 | `data_dir` | `~/.local/share/ai-box` | Persistentes Datenverzeichnis |
+| `gpu_override` | `""` (auto) | GPU manuell festlegen: `nvidia`, `amd`, `intel`, `cpu` |

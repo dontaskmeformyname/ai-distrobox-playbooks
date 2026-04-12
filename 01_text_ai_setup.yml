@@ -16,38 +16,44 @@
     ollama_port: "11434"
     webui_port: "8080"
     data_dir: "{{ ansible_facts['env']['HOME'] }}/.local/share/ai-box"
+    # Manuelle GPU-Auswahl bei mehreren GPUs im System
+    # Mögliche Werte: "nvidia", "amd", "intel", "cpu" oder "" (= automatisch)
+    # Überschreibbar per CLI: -e gpu_override=amd
+    gpu_override: ""
 
   tasks:
-    - name: NVIDIA GPU prüfen (nvidia-smi)
-      ansible.builtin.command: nvidia-smi
-      register: nvidia_check
+    - name: NVIDIA GPU prüfen (lspci)
+      ansible.builtin.shell:
+        cmd: lspci | grep -i nvidia
+      register: nvidia_lspci_check
       failed_when: false
       changed_when: false
 
-    - name: AMD GPU prüfen (rocminfo)
-      ansible.builtin.command: rocminfo
-      register: amd_check
+    - name: AMD GPU prüfen (lspci)
+      ansible.builtin.shell:
+        cmd: lspci | grep -iE 'amd|radeon|advanced micro devices'
+      register: amd_lspci_check
       failed_when: false
       changed_when: false
 
-    - name: Intel GPU prüfen (/dev/dri/renderD128 + vendor ID)
-      ansible.builtin.shell: |
-        ls /dev/dri/renderD128 2>/dev/null && \
-        grep -qi 'intel\|8086' /sys/class/drm/card*/device/vendor 2>/dev/null
-      register: intel_check
+    - name: Intel GPU prüfen (lspci)
+      ansible.builtin.shell:
+        cmd: lspci | grep -iE 'intel.*(graphics|vga|display|uhd|iris|arc)'
+      register: intel_lspci_check
       failed_when: false
       changed_when: false
 
-    - name: Erkannte GPU-Flags setzen
+    - name: Erkannte GPU-Flags setzen (Override oder auto-erkannt)
       ansible.builtin.set_fact:
-        gpu_nvidia: "{{ nvidia_check.rc == 0 }}"
-        gpu_amd: "{{ amd_check.rc == 0 }}"
-        gpu_intel: "{{ intel_check.rc == 0 }}"
+        gpu_nvidia: "{{ (gpu_override == 'nvidia') or (gpu_override == '' and nvidia_lspci_check.rc == 0) }}"
+        gpu_amd:    "{{ (gpu_override == 'amd')    or (gpu_override == '' and amd_lspci_check.rc == 0) }}"
+        gpu_intel:  "{{ (gpu_override == 'intel')  or (gpu_override == '' and intel_lspci_check.rc == 0) }}"
 
     - name: GPU-Ergebnis anzeigen
       ansible.builtin.debug:
         msg: >-
           GPU-Erkennung: NVIDIA={{ gpu_nvidia }} AMD={{ gpu_amd }} Intel={{ gpu_intel }}
+          {{ '(manuell: ' + gpu_override + ')' if gpu_override != '' else '(automatisch via lspci)' }}
 
     - name: Warnung – keine GPU erkannt (CPU-only Modus)
       ansible.builtin.debug:
