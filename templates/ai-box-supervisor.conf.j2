@@ -1,0 +1,25 @@
+; Supervisor-Konfiguration fuer ai-box
+; Generiert von Ansible – nicht manuell bearbeiten.
+
+[supervisord]
+nodaemon=false
+logfile=/data/supervisord.log
+pidfile=/var/run/supervisord.pid
+
+[program:ollama]
+command=ollama serve
+autostart=true
+autorestart=true
+startretries=5
+stdout_logfile=/data/ollama.log
+stderr_logfile=/data/ollama.err
+
+[program:open-webui]
+command=open-webui serve
+autostart=true
+autorestart=true
+startretries=5
+startsecs=15
+environment={% if hf_token != '' %}HF_TOKEN="{{ hf_token }}",{% endif %}CORS_ALLOW_ORIGIN="{{ cors_origin }}",USER_AGENT="{{ user_agent }}",PYTHONUNBUFFERED="1"
+stdout_logfile=/data/webui.log
+stderr_logfile=/data/webui.err
