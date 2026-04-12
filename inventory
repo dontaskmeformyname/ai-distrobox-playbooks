@@ -29,7 +29,7 @@
 
 [ai_hosts]
 # RX 6900 XT (RDNA2 = gfx1030)
-localhost ansible_connection=local gpu_override="" amd_gfx_version=10.3.0
+localhost ansible_connection=local gpu_override="amd" amd_gfx_version=10.3.0
 
 # --- Beispiel: Remote-Hosts per SSH ----------------------------
 # Gruppen anlegen und unter [ai_hosts:children] eintragen
