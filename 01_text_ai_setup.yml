@@ -5,7 +5,29 @@
 # Desktop          : systemd User-Service + .desktop-Eintrag
 # Zielauswahl      : Standard ai_hosts, einschränkbar über --limit
 # Ausführen mit    : ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
+#
+# Optionale Secrets (nie nach GitHub pushen!):
+#   cp secrets.yml.example secrets.yml
+#   # HF_TOKEN eintragen, dann Playbook ausführen
 # ==============================================================
+
+# Secrets aus lokaler Datei laden (nicht im Repo enthalten)
+- name: "Secrets laden"
+  hosts: ai_hosts
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: "secrets.yml einlesen (falls vorhanden)"
+      ansible.builtin.include_vars:
+        file: secrets.yml
+      failed_when: false
+      # Ergebnis: Variable hf_token wird gesetzt wenn die Datei existiert.
+      # Fehlt secrets.yml, läuft das Playbook ohne HF_TOKEN weiter.
+
+    - name: "HF_TOKEN-Status anzeigen"
+      ansible.builtin.debug:
+        msg: "{{ 'HF_TOKEN geladen.' if hf_token | default('') != '' else 'Kein HF_TOKEN – Playbook läuft ohne (ggf. Rate-Limits bei HuggingFace).' }}"
 
 - name: "GPU-Erkennung & Podman-Vorbereitung"
   hosts: ai_hosts
@@ -59,8 +81,6 @@
 
     - name: "NVIDIA GPUs per lspci auflisten"
       ansible.builtin.shell:
-        # Klasse zuerst filtern, dann Hersteller – verhindert False Positives
-        # durch Chipsatz/USB-Controller die ebenfalls "NVIDIA" im Namen tragen könnten
         cmd: >-
           lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
           | grep -i nvidia
@@ -70,8 +90,6 @@
 
     - name: "AMD GPUs per lspci auflisten"
       ansible.builtin.shell:
-        # Klasse zuerst filtern, dann AMD/Radeon – verhindert False Positives durch
-        # AMD-CPU, Chipsatz-Brücken, NVMe-Controller etc.
         cmd: >-
           lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
           | grep -iE 'amd|radeon|advanced micro devices'
@@ -276,8 +294,6 @@
     - name: "Container starten falls gestoppt"
       ansible.builtin.command: podman start {{ container_name }}
       register: container_start
-      # rc=0: Container wurde gestartet
-      # rc=125: Container läuft bereits – kein Fehler
       failed_when: container_start.rc not in [0, 125]
       changed_when: container_start.rc == 0
       when: container_exists.rc == 0
@@ -289,6 +305,8 @@
 
   vars:
     container_name: "ai-box"
+    # hf_token wird aus secrets.yml übernommen (Play 1), Fallback leer
+    hf_token: "{{ hf_token | default('') }}"
 
   tasks:
     - name: "APT-Cache updaten"
@@ -330,9 +348,6 @@
       changed_when: true
 
     - name: "APT-Pinning fuer ROCm einrichten"
-      # Pin-Priority 600: AMD-Repo gewinnt bei ROCm-Paketen gegen Ubuntu noble.
-      # Dadurch löst apt Abhängigkeiten vollständig aus dem ROCm-Repo auf
-      # ohne hold oder --allow-downgrades.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n'
@@ -385,14 +400,13 @@
       register: webui_install
       changed_when: "'Successfully installed' in webui_install.stdout"
 
-    - name: "Supervisor-Konfiguration fuer Ollama und Open WebUI schreiben"
-      # supervisord übernimmt PID 1 im Container und startet beide Dienste
-      # automatisch – auch nach einem Container-Neustart via `podman start`.
-      # restart=true stellt sicher dass die Konfig bei jedem Playbook-Lauf
-      # aktualisiert wird (idempotent durch Dateiinhalt-Vergleich).
+    - name: "Supervisor-Konfiguration schreiben (mit optionalem HF_TOKEN)"
+      # HF_TOKEN wird nur gesetzt wenn secrets.yml einen Wert enthält.
+      # Der Token erscheint nie in stdout/Logs da supervisord env-Vars
+      # nicht ausgibt.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
-        "mkdir -p /etc/supervisor/conf.d && cat > /etc/supervisor/conf.d/ai-box.conf << 'EOF'
+        "mkdir -p /etc/supervisor/conf.d && cat > /etc/supervisor/conf.d/ai-box.conf << 'SUPEOF'
 [supervisord]
 nodaemon=false
 logfile=/data/supervisord.log
@@ -412,10 +426,12 @@ autostart=true
 autorestart=true
 startretries=5
 startsecs=15
+environment={{ 'HF_TOKEN=\"' + hf_token + '\",' if hf_token != '' else '' }}PYTHONUNBUFFERED=\"1\"
 stdout_logfile=/data/webui.log
 stderr_logfile=/data/webui.err
-EOF"
+SUPEOF"
       changed_when: true
+      no_log: true  # Verhindert dass HF_TOKEN im Ansible-Output erscheint
 
     - name: "Laufenden supervisord neu laden (falls aktiv)"
       ansible.builtin.command: >-
@@ -451,8 +467,6 @@ EOF"
       changed_when: false
 
     - name: "Warten bis Open WebUI bereit ist (max 60s)"
-      # Open WebUI braucht beim ersten Start länger (~30s) für DB-Migration
-      # und das Laden der Python-Module.
       ansible.builtin.command: >-
         podman exec {{ container_name }} bash -c
         "curl -sf http://localhost:8080 > /dev/null"
@@ -479,8 +493,6 @@ EOF"
         mode: "0755"
 
     - name: "systemd User-Service fuer ai-box erstellen"
-      # ExecStartPost wartet kurz und startet dann supervisord im Container –
-      # so laufen Ollama und Open WebUI direkt nach `podman start` wieder.
       ansible.builtin.copy:
         dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
         mode: "0644"
@@ -563,6 +575,7 @@ EOF"
           - "  GPU: NVIDIA={{ gpu_nvidia }} AMD={{ gpu_amd }} Intel={{ gpu_intel }}"
           - "  Auswahl: {{ gpu_override if gpu_override != '' else 'automatisch' }}"
           - "  Modus: {{ 'Headless-Server' if is_headless else 'Desktop' }}"
+          - "  HF_TOKEN: {{ 'gesetzt' if hf_token | default('') != '' else 'nicht gesetzt' }}"
           - ""
           - "  → Dienste starten: systemctl --user start ai-box"
           - "  → Open WebUI:      http://localhost:{{ webui_port }}"
