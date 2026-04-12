@@ -26,14 +26,18 @@
   tasks:
     - name: "Alle GPUs per lspci auflisten"
       ansible.builtin.shell:
-        cmd: lspci | grep -E 'VGA|3D|Display'
+        # Nur echte GPU-PCI-Klassen: "VGA compatible controller",
+        # "3D controller", "Display controller" – NVMe/Storage explizit ausgeschlossen
+        cmd: >-
+          lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
+          | grep -iv 'non-volatile\|nvme\|storage\|memory controller'
       register: gpu_list_all
       failed_when: false
       changed_when: false
 
     - name: "Gefundene GPUs anzeigen"
       ansible.builtin.debug:
-        msg: "{{ gpu_list_all.stdout_lines }}"
+        msg: "{{ gpu_list_all.stdout_lines if gpu_list_all.stdout_lines | length > 0 else ['Keine GPU erkannt'] }}"
 
     - name: "NVIDIA GPUs per lspci auflisten"
       ansible.builtin.shell:
