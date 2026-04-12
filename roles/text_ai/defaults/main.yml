@@ -5,6 +5,15 @@ ollama_port: "11434"
 webui_port: "8080"
 data_dir: "{{ ansible_facts['env']['HOME'] }}/.local/share/ai-box"
 
+# Ollama Modellverzeichnis – liegt auf dem persistenten Volume,
+# damit Modelle einen Container-Neubau überleben.
+# Migration einmalig nötig falls Modelle noch im Container liegen:
+#   podman exec ai-box bash -c \
+#     "mkdir -p /data/ollama/models && \
+#      mv /root/.ollama/models/* /data/ollama/models/ 2>/dev/null || \
+#      mv /usr/share/ollama/.ollama/models/* /data/ollama/models/ 2>/dev/null"
+ollama_models_dir: "{{ data_dir }}/ollama/models"
+
 # GPU-Auswahl
 # Hersteller: "nvidia", "amd", "intel", "cpu", "" (= automatisch)
 # Mit Index:  "amd:0", "amd:1", "nvidia:1" usw.
