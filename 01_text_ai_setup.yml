@@ -59,14 +59,22 @@
 
     - name: "NVIDIA GPUs per lspci auflisten"
       ansible.builtin.shell:
-        cmd: lspci | grep -i nvidia
+        # Klasse zuerst filtern, dann Hersteller – verhindert False Positives
+        # durch Chipsatz/USB-Controller die ebenfalls "NVIDIA" im Namen tragen könnten
+        cmd: >-
+          lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
+          | grep -i nvidia
       register: nvidia_lspci_check
       failed_when: false
       changed_when: false
 
     - name: "AMD GPUs per lspci auflisten"
       ansible.builtin.shell:
-        cmd: lspci | grep -iE 'amd|radeon|advanced micro devices'
+        # Klasse zuerst filtern, dann AMD/Radeon – verhindert die 41-Treffer durch
+        # AMD-CPU, Chipsatz-Brücken, NVMe-Controller etc.
+        cmd: >-
+          lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
+          | grep -iE 'amd|radeon|advanced micro devices'
       register: amd_lspci_check
       failed_when: false
       changed_when: false
@@ -369,6 +377,32 @@
         "curl -fsSL https://ollama.com/install.sh | sh"
       when: ollama_check.rc != 0
       changed_when: true
+
+    - name: "Pruefen ob ollama serve bereits laeuft"
+      ansible.builtin.command: >-
+        podman exec {{ container_name }} bash -c
+        "curl -sf http://localhost:11434/api/tags > /dev/null"
+      register: ollama_running
+      failed_when: false
+      changed_when: false
+
+    - name: "ollama serve im Hintergrund starten"
+      ansible.builtin.command: >-
+        podman exec -d {{ container_name }} bash -c
+        "nohup ollama serve > /data/ollama.log 2>&1"
+      when: ollama_running.rc != 0
+      changed_when: true
+
+    - name: "Warten bis ollama serve bereit ist (max 30s)"
+      ansible.builtin.command: >-
+        podman exec {{ container_name }} bash -c
+        "curl -sf http://localhost:11434/api/tags > /dev/null"
+      register: ollama_ready
+      until: ollama_ready.rc == 0
+      retries: 10
+      delay: 3
+      when: ollama_running.rc != 0
+      changed_when: false
 
     - name: "Open WebUI ueber pip installieren"
       ansible.builtin.command: >-
