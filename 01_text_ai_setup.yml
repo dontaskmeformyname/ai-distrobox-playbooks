@@ -15,7 +15,7 @@
     container_name: "ai-box"
     ollama_port: "11434"
     webui_port: "8080"
-    data_dir: "{{ ansible_env.HOME }}/.local/share/ai-box"
+    data_dir: "{{ ansible_facts['env']['HOME'] }}/.local/share/ai-box"
 
   tasks:
     - name: NVIDIA GPU prüfen (nvidia-smi)
@@ -57,8 +57,8 @@
     - name: Headless-Modus erkennen (kein DISPLAY/WAYLAND_DISPLAY)
       ansible.builtin.set_fact:
         is_headless: >-
-          {{ (ansible_env.DISPLAY | default('') == '') and
-             (ansible_env.WAYLAND_DISPLAY | default('') == '') }}
+          {{ (ansible_facts['env'].get('DISPLAY', '') == '') and
+             (ansible_facts['env'].get('WAYLAND_DISPLAY', '') == '') }}
 
     - name: Modus anzeigen
       ansible.builtin.debug:
@@ -66,7 +66,7 @@
 
     - name: User zur render-Gruppe hinzufügen (AMD/Intel)
       ansible.builtin.user:
-        name: "{{ ansible_user_id }}"
+        name: "{{ ansible_facts['user_id'] }}"
         groups: render
         append: true
       become: true
@@ -74,7 +74,7 @@
 
     - name: User zur video-Gruppe hinzufügen
       ansible.builtin.user:
-        name: "{{ ansible_user_id }}"
+        name: "{{ ansible_facts['user_id'] }}"
         groups: video
         append: true
       become: true
@@ -95,8 +95,9 @@
         mode: "0755"
 
     - name: Prüfe ob Container bereits existiert
-      ansible.builtin.command: podman ps -a --format '{{.Names}}'
-      register: container_list
+      ansible.builtin.command: podman container exists {{ container_name }}
+      register: container_exists
+      failed_when: false
       changed_when: false
 
     - name: Podman Container anlegen (NVIDIA)
@@ -112,7 +113,7 @@
         -e DATA_DIR=/data
         ubuntu:24.04 sleep infinity
       when:
-        - container_name not in container_list.stdout_lines
+        - container_exists.rc != 0
         - gpu_nvidia
 
     - name: Podman Container anlegen (AMD)
@@ -130,7 +131,7 @@
         -e DATA_DIR=/data
         ubuntu:24.04 sleep infinity
       when:
-        - container_name not in container_list.stdout_lines
+        - container_exists.rc != 0
         - gpu_amd
         - not gpu_nvidia
 
@@ -147,7 +148,7 @@
         -e DATA_DIR=/data
         ubuntu:24.04 sleep infinity
       when:
-        - container_name not in container_list.stdout_lines
+        - container_exists.rc != 0
         - gpu_intel
         - not gpu_nvidia
         - not gpu_amd
@@ -164,7 +165,7 @@
         -e DATA_DIR=/data
         ubuntu:24.04 sleep infinity
       when:
-        - container_name not in container_list.stdout_lines
+        - container_exists.rc != 0
         - not gpu_nvidia
         - not gpu_amd
         - not gpu_intel
@@ -271,13 +272,13 @@
   tasks:
     - name: systemd User-Service Verzeichnis sicherstellen
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.config/systemd/user"
+        path: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
         state: directory
         mode: "0755"
 
     - name: systemd User-Service für ai-box erstellen
       ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.config/systemd/user/ai-box.service"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
         mode: "0644"
         content: |
           [Unit]
@@ -304,26 +305,26 @@
 
     - name: Lokales bin-Verzeichnis sicherstellen
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.local/bin"
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
         state: directory
         mode: "0755"
 
     - name: Launcher-Skript aus Template erzeugen
       ansible.builtin.template:
         src: templates/text-ki-start.j2
-        dest: "{{ ansible_env.HOME }}/.local/bin/text-ki-start"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start"
         mode: "0755"
 
     - name: Lokales applications-Verzeichnis sicherstellen
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.local/share/applications"
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications"
         state: directory
         mode: "0755"
       when: not (is_headless | default(true) | bool)
 
     - name: Desktop-Eintrag erstellen
       ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.local/share/applications/text-ki.desktop"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/share/applications/text-ki.desktop"
         mode: "0644"
         content: |
           [Desktop Entry]
@@ -332,7 +333,7 @@
           Name=Text KI
           GenericName=Lokale Text-KI
           Comment=Ollama und Open WebUI starten
-          Exec={{ ansible_env.HOME }}/.local/bin/text-ki-start
+          Exec={{ ansible_facts['env']['HOME'] }}/.local/bin/text-ki-start
           Icon=text-editor
           Terminal=false
           Categories=Science;Education;
@@ -342,7 +343,7 @@
 
     - name: Desktop-Datenbank aktualisieren
       ansible.builtin.command: >-
-        update-desktop-database {{ ansible_env.HOME }}/.local/share/applications
+        update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
       changed_when: false
       failed_when: false
       when: not (is_headless | default(true) | bool)
