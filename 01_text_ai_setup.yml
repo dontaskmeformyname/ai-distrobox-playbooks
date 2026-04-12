@@ -6,12 +6,17 @@
 # Zielauswahl      : Standard ai_hosts, einschränkbar über --limit
 # Ausführen mit    : ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
 #
+# Voraussetzung Collection:
+#   ansible-galaxy collection install containers.podman
+#
 # Optionale Secrets (nie nach GitHub pushen!):
 #   cp secrets.yml.example secrets.yml
 #   # HF_TOKEN eintragen, dann Playbook ausführen
 # ==============================================================
 
-# Secrets aus lokaler Datei laden (nicht im Repo enthalten)
+# ---------------------------------------------------------------------------
+# Play 1 – Secrets laden
+# ---------------------------------------------------------------------------
 - name: "Secrets laden"
   hosts: ai_hosts
   become: false
@@ -62,7 +67,10 @@
         msg: "✅ HF_TOKEN geladen – HuggingFace Rate-Limits erhöht."
       when: hf_token | default('') != ''
 
-- name: "GPU-Erkennung & Podman-Vorbereitung"
+# ---------------------------------------------------------------------------
+# Play 2 – GPU-Erkennung & Podman-Container anlegen (Host-Ebene)
+# ---------------------------------------------------------------------------
+- name: "GPU-Erkennung & Podman-Container anlegen"
   hosts: ai_hosts
   become: false
 
@@ -79,28 +87,18 @@
     gpu_override: ""
     # HSA_OVERRIDE_GFX_VERSION für AMD ROCm in Podman-Containern.
     # In Containern fehlt /sys/module/amdgpu/version – ROCm kann die
-    # GPU-Architektur nicht automatisch ermitteln. Diese Variable gibt
-    # die GFX-Version manuell vor.
-    # Wert ermitteln (auf dem Host, nicht im Container):
-    #   rocminfo | grep 'Name:' | grep gfx
-    #   Ausgabe z.B. "gfx1030" → Wert "10.3.0"
+    # GPU-Architektur nicht automatisch ermitteln.
+    # Wert ermitteln: rocminfo | grep 'Name:' | grep gfx
     # Häufige Werte:
     #   gfx1010 → 10.1.0  (RX 5700 XT, RDNA1)
     #   gfx1030 → 10.3.0  (RX 6800/6900 XT, RDNA2)
-    #   gfx1031 → 10.3.1  (RX 6750 XT, RDNA2)
-    #   gfx1032 → 10.3.2  (RX 6600 XT, RDNA2)
     #   gfx1100 → 11.0.0  (RX 7900 XTX, RDNA3)
-    #   gfx1101 → 11.0.1  (RX 7800 XT, RDNA3)
-    # Leer lassen wenn ROCm die GPU nativ erkennt (kein Podman-Container).
-    # Per Inventory setzen: amd_gfx_version=10.3.0
-    # Per CLI überschreiben: -e amd_gfx_version=11.0.0
+    # Leer lassen wenn ROCm die GPU nativ erkennt.
     amd_gfx_version: ""
 
   tasks:
     - name: "Alle GPUs per lspci auflisten"
       ansible.builtin.shell:
-        # Nur echte GPU-PCI-Klassen: "VGA compatible controller",
-        # "3D controller", "Display controller" – NVMe/Storage explizit ausgeschlossen
         cmd: >-
           lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
           | grep -iv 'non-volatile\|nvme\|storage\|memory controller'
@@ -112,7 +110,7 @@
       ansible.builtin.debug:
         msg: "{{ gpu_list_all.stdout_lines if gpu_list_all.stdout_lines | length > 0 else ['Keine GPU erkannt'] }}"
 
-    - name: "NVIDIA GPUs per lspci auflisten"
+    - name: "NVIDIA GPUs per lspci erkennen"
       ansible.builtin.shell:
         cmd: >-
           lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
@@ -121,7 +119,7 @@
       failed_when: false
       changed_when: false
 
-    - name: "AMD GPUs per lspci auflisten"
+    - name: "AMD GPUs per lspci erkennen"
       ansible.builtin.shell:
         cmd: >-
           lspci | grep -E 'VGA compatible controller|3D controller|Display controller'
@@ -130,7 +128,7 @@
       failed_when: false
       changed_when: false
 
-    - name: "Intel GPUs per lspci auflisten"
+    - name: "Intel GPUs per lspci erkennen"
       ansible.builtin.shell:
         cmd: lspci | grep -iE 'intel.*(graphics|vga|display|uhd|iris|arc)'
       register: intel_lspci_check
@@ -148,7 +146,7 @@
         gpu_amd:    "{{ (_gpu_vendor == 'amd')    or (_gpu_vendor == '' and amd_lspci_check.rc == 0) }}"
         gpu_intel:  "{{ (_gpu_vendor == 'intel')  or (_gpu_vendor == '' and intel_lspci_check.rc == 0) }}"
 
-    - name: "AMD DRI-Node fuer gewaehlten Index ermitteln"
+    - name: "AMD DRI-Node für gewählten Index ermitteln"
       ansible.builtin.shell:
         cmd: "ls /dev/dri/renderD* 2>/dev/null | sort | sed -n '{{ (_gpu_index | int) + 1 }}p'"
       register: amd_dri_node
@@ -161,7 +159,7 @@
         amd_render_node: "{{ amd_dri_node.stdout | default('/dev/dri/renderD128') | trim }}"
       when: gpu_amd
 
-    - name: "NVIDIA GPU-Index fuer CUDA_VISIBLE_DEVICES setzen"
+    - name: "NVIDIA GPU-Index für CUDA_VISIBLE_DEVICES setzen"
       ansible.builtin.set_fact:
         nvidia_gpu_index: "{{ _gpu_index }}"
       when: gpu_nvidia
@@ -177,7 +175,7 @@
         msg: >
           ⚠️  Mehrere GPU-Hersteller erkannt!
           Aktive Priorität: {{ 'NVIDIA' if gpu_nvidia else 'AMD' if gpu_amd else 'Intel' }}.
-          Verwende gpu_override um eine bestimmte GPU festzulegen (z.B. -e gpu_override=amd:0).
+          Verwende gpu_override (z.B. -e gpu_override=amd:0).
       when: (gpu_nvidia | bool | int) + (gpu_amd | bool | int) + (gpu_intel | bool | int) > 1
 
     - name: "Warnung – mehrere NVIDIA GPUs erkannt"
@@ -205,7 +203,7 @@
         msg: "⚠️ Keine GPU erkannt – Ollama läuft im CPU-only Modus."
       when: not gpu_nvidia and not gpu_amd and not gpu_intel
 
-    - name: "Headless-Modus erkennen (kein DISPLAY oder WAYLAND_DISPLAY)"
+    - name: "Headless-Modus erkennen"
       ansible.builtin.set_fact:
         is_headless: >-
           {{ (ansible_facts['env'].get('DISPLAY', '') == '') and
@@ -215,7 +213,7 @@
       ansible.builtin.debug:
         msg: "{{ 'Headless-Server erkannt – Desktop-Integration wird übersprungen.' if is_headless else 'Desktop erkannt – Desktop-Integration wird eingerichtet.' }}"
 
-    - name: "User zur render-Gruppe hinzufuegen (AMD/Intel)"
+    - name: "User zur render-Gruppe hinzufügen (AMD/Intel)"
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
         groups: render
@@ -223,14 +221,14 @@
       become: true
       when: gpu_amd or gpu_intel
 
-    - name: "User zur video-Gruppe hinzufuegen"
+    - name: "User zur video-Gruppe hinzufügen"
       ansible.builtin.user:
         name: "{{ ansible_facts['user_id'] }}"
         groups: video
         append: true
       become: true
 
-    - name: "Gruppenrechte fuer /dev/kfd setzen (AMD)"
+    - name: "Gruppenrechte für /dev/kfd setzen (AMD)"
       ansible.builtin.file:
         path: /dev/kfd
         group: render
@@ -239,68 +237,90 @@
       ignore_errors: true
       when: gpu_amd
 
-    - name: "Datenverzeichnis fuer Container anlegen"
+    - name: "Datenverzeichnis für Container anlegen"
       ansible.builtin.file:
         path: "{{ data_dir }}"
         state: directory
         mode: "0755"
 
-    - name: "Pruefen ob Container bereits existiert"
+    - name: "Prüfen ob Container bereits existiert"
       ansible.builtin.command: podman container exists {{ container_name }}
       register: container_exists
       failed_when: false
       changed_when: false
 
     - name: "Podman Container anlegen (NVIDIA)"
-      ansible.builtin.command: >-
-        podman run -d
-        --name {{ container_name }}
-        --device nvidia.com/gpu={{ nvidia_gpu_index | default(0) }}
-        --security-opt=label=disable
-        -p {{ ollama_port }}:11434
-        -p {{ webui_port }}:8080
-        -v {{ data_dir }}:/data:z
-        -e OLLAMA_KEEP_ALIVE=0
-        -e CUDA_VISIBLE_DEVICES={{ nvidia_gpu_index | default(0) }}
-        -e DATA_DIR=/data
-        ubuntu:24.04 sleep infinity
+      containers.podman.podman_container:
+        name: "{{ container_name }}"
+        image: ubuntu:24.04
+        state: started
+        command: sleep infinity
+        detach: true
+        security_opt:
+          - label=disable
+        ports:
+          - "{{ ollama_port }}:11434"
+          - "{{ webui_port }}:8080"
+        volumes:
+          - "{{ data_dir }}:/data:z"
+        device:
+          - "nvidia.com/gpu={{ nvidia_gpu_index | default(0) }}"
+        env:
+          OLLAMA_KEEP_ALIVE: "0"
+          CUDA_VISIBLE_DEVICES: "{{ nvidia_gpu_index | default(0) }}"
+          DATA_DIR: /data
       when:
         - container_exists.rc != 0
         - gpu_nvidia
 
     - name: "Podman Container anlegen (AMD)"
-      ansible.builtin.command: >-
-        podman run -d
-        --name {{ container_name }}
-        --device /dev/kfd
-        --device {{ amd_render_node | default('/dev/dri/renderD128') }}
-        --group-add render
-        --group-add video
-        --security-opt=label=disable
-        -p {{ ollama_port }}:11434
-        -p {{ webui_port }}:8080
-        -v {{ data_dir }}:/data:z
-        -e OLLAMA_KEEP_ALIVE=0
-        {% if amd_gfx_version != '' %}-e HSA_OVERRIDE_GFX_VERSION={{ amd_gfx_version }}{% endif %}
-        -e DATA_DIR=/data
-        ubuntu:24.04 sleep infinity
+      containers.podman.podman_container:
+        name: "{{ container_name }}"
+        image: ubuntu:24.04
+        state: started
+        command: sleep infinity
+        detach: true
+        security_opt:
+          - label=disable
+        ports:
+          - "{{ ollama_port }}:11434"
+          - "{{ webui_port }}:8080"
+        volumes:
+          - "{{ data_dir }}:/data:z"
+        device:
+          - /dev/kfd
+          - "{{ amd_render_node | default('/dev/dri/renderD128') }}"
+        group_add:
+          - render
+          - video
+        env: "{{ {'OLLAMA_KEEP_ALIVE': '0', 'DATA_DIR': '/data',
+                   'HSA_OVERRIDE_GFX_VERSION': amd_gfx_version}
+                  if amd_gfx_version != ''
+                  else {'OLLAMA_KEEP_ALIVE': '0', 'DATA_DIR': '/data'} }}"
       when:
         - container_exists.rc != 0
         - gpu_amd
         - not gpu_nvidia
 
     - name: "Podman Container anlegen (Intel)"
-      ansible.builtin.command: >-
-        podman run -d
-        --name {{ container_name }}
-        --device /dev/dri
-        --security-opt=label=disable
-        -p {{ ollama_port }}:11434
-        -p {{ webui_port }}:8080
-        -v {{ data_dir }}:/data:z
-        -e OLLAMA_KEEP_ALIVE=0
-        -e DATA_DIR=/data
-        ubuntu:24.04 sleep infinity
+      containers.podman.podman_container:
+        name: "{{ container_name }}"
+        image: ubuntu:24.04
+        state: started
+        command: sleep infinity
+        detach: true
+        security_opt:
+          - label=disable
+        ports:
+          - "{{ ollama_port }}:11434"
+          - "{{ webui_port }}:8080"
+        volumes:
+          - "{{ data_dir }}:/data:z"
+        device:
+          - /dev/dri
+        env:
+          OLLAMA_KEEP_ALIVE: "0"
+          DATA_DIR: /data
       when:
         - container_exists.rc != 0
         - gpu_intel
@@ -308,16 +328,22 @@
         - not gpu_amd
 
     - name: "Podman Container anlegen (CPU-only Fallback)"
-      ansible.builtin.command: >-
-        podman run -d
-        --name {{ container_name }}
-        --security-opt=label=disable
-        -p {{ ollama_port }}:11434
-        -p {{ webui_port }}:8080
-        -v {{ data_dir }}:/data:z
-        -e OLLAMA_KEEP_ALIVE=0
-        -e DATA_DIR=/data
-        ubuntu:24.04 sleep infinity
+      containers.podman.podman_container:
+        name: "{{ container_name }}"
+        image: ubuntu:24.04
+        state: started
+        command: sleep infinity
+        detach: true
+        security_opt:
+          - label=disable
+        ports:
+          - "{{ ollama_port }}:11434"
+          - "{{ webui_port }}:8080"
+        volumes:
+          - "{{ data_dir }}:/data:z"
+        env:
+          OLLAMA_KEEP_ALIVE: "0"
+          DATA_DIR: /data
       when:
         - container_exists.rc != 0
         - not gpu_nvidia
@@ -325,198 +351,322 @@
         - not gpu_intel
 
     - name: "Container starten falls gestoppt"
-      ansible.builtin.command: podman start {{ container_name }}
-      register: container_start
-      failed_when: container_start.rc not in [0, 125]
-      changed_when: container_start.rc == 0
+      containers.podman.podman_container:
+        name: "{{ container_name }}"
+        state: started
       when: container_exists.rc == 0
 
-- name: "Text-KI Setup innerhalb des Podman Containers"
+# ---------------------------------------------------------------------------
+# Play 3 – Software im Container einrichten
+#   Verbindung über containers.podman.podman – alle Ansible-Module
+#   (apt, copy, template, pip, ...) arbeiten direkt im Container.
+# ---------------------------------------------------------------------------
+- name: "Text-KI Setup im Container"
   hosts: ai_hosts
   become: false
   gather_facts: false
 
   vars:
     container_name: "ai-box"
-    # hf_token wird aus secrets.yml übernommen (Play 1), Fallback leer
     hf_token: "{{ hf_token | default('') }}"
+    # CORS auf localhost beschränken (kein offenes *)
+    cors_origin: "http://localhost:8080"
+    # USER_AGENT für LangChain-HTTP-Requests
+    user_agent: "open-webui"
 
   tasks:
-    - name: "APT-Cache updaten"
-      ansible.builtin.command: podman exec -u root {{ container_name }} apt-get update -qq
-      changed_when: false
+    # -- APT-Basis --------------------------------------------------------
+    - name: "APT-Cache aktualisieren"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Erforderliche Basis-Pakete installieren (inkl. ffmpeg)"
-      # ffmpeg wird von Open WebUI fuer Spracheingabe (Whisper) benoetigt.
-      # Ohne ffmpeg erscheint beim Start eine RuntimeWarning und die
-      # Audio-Transkription im Browser funktioniert nicht.
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }}
-        apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip supervisor ffmpeg
-      changed_when: true
+    - name: "Basis-Pakete installieren"
+      # ffmpeg: wird von Open WebUI fuer Whisper-Spracheingabe benoetigt
+      # supervisor: Prozessmanager fuer Ollama + Open WebUI
+      ansible.builtin.apt:
+        name:
+          - curl
+          - wget
+          - gpg
+          - ca-certificates
+          - zstd
+          - python3
+          - python3-pip
+          - supervisor
+          - ffmpeg
+        state: present
+      become: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Keyrings Verzeichnis erstellen"
-      ansible.builtin.command: podman exec -u root {{ container_name }} mkdir -p /etc/apt/keyrings
-      changed_when: false
+    - name: "Keyrings-Verzeichnis anlegen"
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      become: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "NVIDIA CUDA Repository einrichten"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb &&
-         dpkg -i /tmp/cuda-keyring.deb &&
-         apt-get update -qq"
+    # -- NVIDIA CUDA ------------------------------------------------------
+    - name: "NVIDIA CUDA Keyring herunterladen"
+      ansible.builtin.get_url:
+        url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+        dest: /tmp/cuda-keyring.deb
+        mode: "0644"
+      become: true
       when: gpu_nvidia | default(false) | bool
-      changed_when: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "AMD ROCm GPG-Key herunterladen"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg"
-      when: gpu_amd | default(false) | bool
-      changed_when: true
+    - name: "NVIDIA CUDA Keyring installieren"
+      ansible.builtin.apt:
+        deb: /tmp/cuda-keyring.deb
+      become: true
+      when: gpu_nvidia | default(false) | bool
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "AMD ROCm APT-Repository hinzufuegen"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main' > /etc/apt/sources.list.d/rocm.list &&
-         apt-get update -qq"
-      when: gpu_amd | default(false) | bool
-      changed_when: true
+    - name: "APT-Cache nach CUDA-Repo aktualisieren"
+      ansible.builtin.apt:
+        update_cache: true
+      become: true
+      when: gpu_nvidia | default(false) | bool
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "APT-Pinning fuer ROCm einrichten"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n'
-        > /etc/apt/preferences.d/rocm-pin-600"
+    # -- AMD ROCm ---------------------------------------------------------
+    - name: "AMD ROCm GPG-Key herunterladen und als Keyring speichern"
+      ansible.builtin.shell:
+        cmd: curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg
+        creates: /etc/apt/keyrings/rocm.gpg
+      become: true
       when: gpu_amd | default(false) | bool
-      changed_when: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
+
+    - name: "AMD ROCm APT-Repository einrichten"
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/latest noble main"
+        state: present
+        filename: rocm
+        update_cache: true
+      become: true
+      when: gpu_amd | default(false) | bool
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
+
+    - name: "APT-Pinning für ROCm einrichten"
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/rocm-pin-600
+        mode: "0644"
+        content: |
+          Package: *
+          Pin: release o=repo.radeon.com
+          Pin-Priority: 600
+      become: true
+      when: gpu_amd | default(false) | bool
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
     - name: "AMD ROCm installieren"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "apt-get install -y rocm"
+      ansible.builtin.apt:
+        name: rocm
+        state: present
+      become: true
       when: gpu_amd | default(false) | bool
       async: 3600
       poll: 15
-      changed_when: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Intel oneAPI Repository einrichten"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor > /etc/apt/keyrings/intel-graphics.gpg &&
-         echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble client' > /etc/apt/sources.list.d/intel-gpu.list &&
-         apt-get update -qq"
+    # -- Intel oneAPI -----------------------------------------------------
+    - name: "Intel GPU GPG-Key herunterladen und als Keyring speichern"
+      ansible.builtin.shell:
+        cmd: curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor > /etc/apt/keyrings/intel-graphics.gpg
+        creates: /etc/apt/keyrings/intel-graphics.gpg
+      become: true
       when: gpu_intel | default(false) | bool
-      changed_when: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
+
+    - name: "Intel GPU APT-Repository einrichten"
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble client"
+        state: present
+        filename: intel-gpu
+        update_cache: true
+      become: true
+      when: gpu_intel | default(false) | bool
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
     - name: "Intel Level Zero installieren"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }}
-        apt-get install -y intel-opencl-icd intel-level-zero-gpu level-zero
+      ansible.builtin.apt:
+        name:
+          - intel-opencl-icd
+          - intel-level-zero-gpu
+          - level-zero
+        state: present
+      become: true
       when: gpu_intel | default(false) | bool
-      changed_when: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Pruefen ob Ollama bereits installiert ist"
-      ansible.builtin.command: podman exec {{ container_name }} which ollama
-      register: ollama_check
-      failed_when: false
-      changed_when: false
+    # -- Ollama -----------------------------------------------------------
+    - name: "Prüfen ob Ollama bereits installiert ist"
+      ansible.builtin.stat:
+        path: /usr/local/bin/ollama
+      register: ollama_bin
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Ollama ueber Install-Skript installieren"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "curl -fsSL https://ollama.com/install.sh | sh"
-      when: ollama_check.rc != 0
-      changed_when: true
+    - name: "Ollama Install-Skript herunterladen"
+      ansible.builtin.get_url:
+        url: https://ollama.com/install.sh
+        dest: /tmp/ollama-install.sh
+        mode: "0755"
+      become: true
+      when: not ollama_bin.stat.exists
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Open WebUI ueber pip installieren"
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }}
-        pip3 install open-webui --break-system-packages
-      register: webui_install
-      changed_when: "'Successfully installed' in webui_install.stdout"
+    - name: "Ollama installieren"
+      ansible.builtin.command:
+        cmd: /tmp/ollama-install.sh
+        creates: /usr/local/bin/ollama
+      become: true
+      when: not ollama_bin.stat.exists
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
+
+    # -- Open WebUI -------------------------------------------------------
+    - name: "Open WebUI per pip installieren"
+      ansible.builtin.pip:
+        name: open-webui
+        state: present
+        extra_args: "--break-system-packages"
+      become: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
+
+    # -- Supervisor-Konfiguration -----------------------------------------
+    - name: "Supervisor conf.d-Verzeichnis anlegen"
+      ansible.builtin.file:
+        path: /etc/supervisor/conf.d
+        state: directory
+        mode: "0755"
+      become: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
     - name: "Supervisor-Konfiguration schreiben"
-      # Gesetzte Umgebungsvariablen:
-      #   HF_TOKEN        - HuggingFace Token (optional, aus secrets.yml)
-      #   CORS_ALLOW_ORIGIN - auf localhost begrenzen (kein offenes *)
-      #   USER_AGENT      - identifiziert Requests von Open WebUI (LangChain)
-      #   PYTHONUNBUFFERED  - Logs erscheinen sofort ohne Pufferung
-      # no_log verhindert dass HF_TOKEN im Ansible-Output erscheint.
-      ansible.builtin.command: >-
-        podman exec -u root {{ container_name }} bash -c
-        "mkdir -p /etc/supervisor/conf.d && cat > /etc/supervisor/conf.d/ai-box.conf << 'SUPEOF'
-[supervisord]
-nodaemon=false
-logfile=/data/supervisord.log
-pidfile=/var/run/supervisord.pid
-
-[program:ollama]
-command=ollama serve
-autostart=true
-autorestart=true
-startretries=5
-stdout_logfile=/data/ollama.log
-stderr_logfile=/data/ollama.err
-
-[program:open-webui]
-command=open-webui serve
-autostart=true
-autorestart=true
-startretries=5
-startsecs=15
-environment={{ 'HF_TOKEN=\"' + hf_token + '\",' if hf_token != '' else '' }}CORS_ALLOW_ORIGIN=\"http://localhost:8080\",USER_AGENT=\"open-webui/{{ '0.8' }}\",PYTHONUNBUFFERED=\"1\"
-stdout_logfile=/data/webui.log
-stderr_logfile=/data/webui.err
-SUPEOF"
-      changed_when: true
+      # Gesetzte Umgebungsvariablen für open-webui:
+      #   HF_TOKEN          – HuggingFace Token (optional, aus secrets.yml)
+      #   CORS_ALLOW_ORIGIN – auf localhost beschränken (kein offenes *)
+      #   USER_AGENT        – identifiziert LangChain-HTTP-Requests
+      #   PYTHONUNBUFFERED  – Logs ohne Pufferung
+      ansible.builtin.template:
+        src: templates/ai-box-supervisor.conf.j2
+        dest: /etc/supervisor/conf.d/ai-box.conf
+        mode: "0644"
+      become: true
       no_log: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
+      notify: supervisord neu laden
 
-    - name: "Laufenden supervisord neu laden (falls aktiv)"
-      ansible.builtin.command: >-
-        podman exec {{ container_name }} bash -c
-        "supervisorctl reread && supervisorctl update"
-      register: supervisord_reload
+  handlers:
+    - name: supervisord neu laden
+      ansible.builtin.command:
+        cmd: supervisorctl reread && supervisorctl update
+      become: true
       failed_when: false
-      changed_when: supervisord_reload.rc == 0
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Pruefen ob supervisord bereits laeuft"
-      ansible.builtin.command: >-
-        podman exec {{ container_name }} bash -c
-        "pgrep -x supervisord > /dev/null"
+# ---------------------------------------------------------------------------
+# Play 4 – supervisord starten, Bereitschaft prüfen
+# ---------------------------------------------------------------------------
+- name: "Dienste starten und auf Bereitschaft warten"
+  hosts: ai_hosts
+  become: false
+  gather_facts: false
+
+  vars:
+    container_name: "ai-box"
+
+  tasks:
+    - name: "Prüfen ob supervisord bereits läuft"
+      ansible.builtin.command:
+        cmd: pgrep -x supervisord
       register: supervisord_running
       failed_when: false
       changed_when: false
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
     - name: "supervisord starten (startet Ollama + Open WebUI automatisch)"
-      ansible.builtin.command: >-
-        podman exec -d {{ container_name }} bash -c
-        "supervisord -c /etc/supervisor/supervisord.conf"
+      ansible.builtin.command:
+        cmd: supervisord -c /etc/supervisor/supervisord.conf
+      become: true
       when: supervisord_running.rc != 0
-      changed_when: true
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
-    - name: "Warten bis ollama serve bereit ist (max 30s)"
-      ansible.builtin.command: >-
-        podman exec {{ container_name }} bash -c
-        "curl -sf http://localhost:11434/api/tags > /dev/null"
+    - name: "Warten bis Ollama bereit ist (max 30s)"
+      ansible.builtin.uri:
+        url: http://localhost:11434/api/tags
+        status_code: 200
       register: ollama_ready
-      until: ollama_ready.rc == 0
+      until: ollama_ready.status == 200
       retries: 10
       delay: 3
-      changed_when: false
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
     - name: "Warten bis Open WebUI bereit ist (max 60s)"
-      # Open WebUI braucht beim ersten Start länger (~30s) für DB-Migration
-      # und das Laden der Python-Module.
-      ansible.builtin.command: >-
-        podman exec {{ container_name }} bash -c
-        "curl -sf http://localhost:8080 > /dev/null"
+      ansible.builtin.uri:
+        url: http://localhost:8080
+        status_code: 200
       register: webui_ready
-      until: webui_ready.rc == 0
+      until: webui_ready.status == 200
       retries: 20
       delay: 3
-      changed_when: false
+      vars:
+        ansible_connection: containers.podman.podman
+        ansible_podman_container: "{{ container_name }}"
 
+# ---------------------------------------------------------------------------
+# Play 5 – systemd User-Service und Desktop-Integration (Host-Ebene)
+# ---------------------------------------------------------------------------
 - name: "systemd User-Service und Desktop-Integration"
   hosts: ai_hosts
   become: false
@@ -533,7 +683,7 @@ SUPEOF"
         state: directory
         mode: "0755"
 
-    - name: "systemd User-Service fuer ai-box erstellen"
+    - name: "systemd User-Service für ai-box erstellen"
       ansible.builtin.copy:
         dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/ai-box.service"
         mode: "0644"
@@ -600,8 +750,8 @@ SUPEOF"
       when: not (is_headless | default(true) | bool)
 
     - name: "Desktop-Datenbank aktualisieren"
-      ansible.builtin.command: >-
-        update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
+      ansible.builtin.command:
+        cmd: update-desktop-database {{ ansible_facts['env']['HOME'] }}/.local/share/applications
       changed_when: false
       failed_when: false
       when: not (is_headless | default(true) | bool)
