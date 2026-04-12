@@ -11,6 +11,7 @@ command=ollama serve
 autostart=true
 autorestart=true
 startretries=5
+environment=OLLAMA_MODELS="{{ ollama_models_dir }}"
 stdout_logfile=/data/ollama.log
 stderr_logfile=/data/ollama.err
 
