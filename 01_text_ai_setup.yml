@@ -346,10 +346,13 @@
       ansible.builtin.command: podman exec -u root {{ container_name }} apt-get update -qq
       changed_when: false
 
-    - name: "Erforderliche Basis-Pakete installieren"
+    - name: "Erforderliche Basis-Pakete installieren (inkl. ffmpeg)"
+      # ffmpeg wird von Open WebUI fuer Spracheingabe (Whisper) benoetigt.
+      # Ohne ffmpeg erscheint beim Start eine RuntimeWarning und die
+      # Audio-Transkription im Browser funktioniert nicht.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }}
-        apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip supervisor
+        apt-get install -y curl wget gpg ca-certificates zstd python3 python3-pip supervisor ffmpeg
       changed_when: true
 
     - name: "Keyrings Verzeichnis erstellen"
@@ -433,9 +436,13 @@
       register: webui_install
       changed_when: "'Successfully installed' in webui_install.stdout"
 
-    - name: "Supervisor-Konfiguration schreiben (mit optionalem HF_TOKEN)"
-      # HF_TOKEN wird nur gesetzt wenn secrets.yml einen Wert enthält.
-      # no_log verhindert dass der Token im Ansible-Output erscheint.
+    - name: "Supervisor-Konfiguration schreiben"
+      # Gesetzte Umgebungsvariablen:
+      #   HF_TOKEN        - HuggingFace Token (optional, aus secrets.yml)
+      #   CORS_ALLOW_ORIGIN - auf localhost begrenzen (kein offenes *)
+      #   USER_AGENT      - identifiziert Requests von Open WebUI (LangChain)
+      #   PYTHONUNBUFFERED  - Logs erscheinen sofort ohne Pufferung
+      # no_log verhindert dass HF_TOKEN im Ansible-Output erscheint.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "mkdir -p /etc/supervisor/conf.d && cat > /etc/supervisor/conf.d/ai-box.conf << 'SUPEOF'
@@ -458,7 +465,7 @@ autostart=true
 autorestart=true
 startretries=5
 startsecs=15
-environment={{ 'HF_TOKEN=\"' + hf_token + '\",' if hf_token != '' else '' }}PYTHONUNBUFFERED=\"1\"
+environment={{ 'HF_TOKEN=\"' + hf_token + '\",' if hf_token != '' else '' }}CORS_ALLOW_ORIGIN=\"http://localhost:8080\",USER_AGENT=\"open-webui/{{ '0.8' }}\",PYTHONUNBUFFERED=\"1\"
 stdout_logfile=/data/webui.log
 stderr_logfile=/data/webui.err
 SUPEOF"
