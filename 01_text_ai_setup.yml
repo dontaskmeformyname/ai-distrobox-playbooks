@@ -18,16 +18,49 @@
   gather_facts: false
 
   tasks:
-    - name: "secrets.yml einlesen (falls vorhanden)"
+    - name: "Pruefen ob secrets.yml existiert"
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/secrets.yml"
+      register: secrets_file
+      delegate_to: localhost
+      run_once: true
+
+    - name: "Warnung – secrets.yml fehlt"
+      ansible.builtin.debug:
+        msg:
+          - "⚠️⚠️⚠️  secrets.yml nicht gefunden!"
+          - ""
+          - "  HuggingFace-Modelle werden ohne Token geladen."
+          - "  Das kann zu Rate-Limits und fehlgeschlagenen Downloads führen."
+          - ""
+          - "  Beheben:"
+          - "    cp secrets.yml.example secrets.yml"
+          - "    # HF_TOKEN in secrets.yml eintragen"
+          - "    # Token erstellen: https://huggingface.co/settings/tokens"
+          - "    ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass"
+      when: not secrets_file.stat.exists
+
+    - name: "secrets.yml einlesen"
       ansible.builtin.include_vars:
-        file: secrets.yml
-      failed_when: false
-      # Ergebnis: Variable hf_token wird gesetzt wenn die Datei existiert.
-      # Fehlt secrets.yml, läuft das Playbook ohne HF_TOKEN weiter.
+        file: "{{ playbook_dir }}/secrets.yml"
+      when: secrets_file.stat.exists
+
+    - name: "Warnung – secrets.yml vorhanden aber hf_token leer"
+      ansible.builtin.debug:
+        msg:
+          - "⚠️  secrets.yml gefunden, aber hf_token ist leer!"
+          - ""
+          - "  Trage deinen HuggingFace-Token in secrets.yml ein:"
+          - "    hf_token: \"hf_DEINTOKEN\""
+          - "  Token erstellen: https://huggingface.co/settings/tokens"
+      when:
+        - secrets_file.stat.exists
+        - hf_token | default('') == ''
 
     - name: "HF_TOKEN-Status anzeigen"
       ansible.builtin.debug:
-        msg: "{{ 'HF_TOKEN geladen.' if hf_token | default('') != '' else 'Kein HF_TOKEN – Playbook läuft ohne (ggf. Rate-Limits bei HuggingFace).' }}"
+        msg: "✅ HF_TOKEN geladen – HuggingFace Rate-Limits erhöht."
+      when: hf_token | default('') != ''
 
 - name: "GPU-Erkennung & Podman-Vorbereitung"
   hosts: ai_hosts
@@ -402,8 +435,7 @@
 
     - name: "Supervisor-Konfiguration schreiben (mit optionalem HF_TOKEN)"
       # HF_TOKEN wird nur gesetzt wenn secrets.yml einen Wert enthält.
-      # Der Token erscheint nie in stdout/Logs da supervisord env-Vars
-      # nicht ausgibt.
+      # no_log verhindert dass der Token im Ansible-Output erscheint.
       ansible.builtin.command: >-
         podman exec -u root {{ container_name }} bash -c
         "mkdir -p /etc/supervisor/conf.d && cat > /etc/supervisor/conf.d/ai-box.conf << 'SUPEOF'
@@ -431,7 +463,7 @@ stdout_logfile=/data/webui.log
 stderr_logfile=/data/webui.err
 SUPEOF"
       changed_when: true
-      no_log: true  # Verhindert dass HF_TOKEN im Ansible-Output erscheint
+      no_log: true
 
     - name: "Laufenden supervisord neu laden (falls aktiv)"
       ansible.builtin.command: >-
@@ -467,6 +499,8 @@ SUPEOF"
       changed_when: false
 
     - name: "Warten bis Open WebUI bereit ist (max 60s)"
+      # Open WebUI braucht beim ersten Start länger (~30s) für DB-Migration
+      # und das Laden der Python-Module.
       ansible.builtin.command: >-
         podman exec {{ container_name }} bash -c
         "curl -sf http://localhost:8080 > /dev/null"
@@ -575,7 +609,7 @@ SUPEOF"
           - "  GPU: NVIDIA={{ gpu_nvidia }} AMD={{ gpu_amd }} Intel={{ gpu_intel }}"
           - "  Auswahl: {{ gpu_override if gpu_override != '' else 'automatisch' }}"
           - "  Modus: {{ 'Headless-Server' if is_headless else 'Desktop' }}"
-          - "  HF_TOKEN: {{ 'gesetzt' if hf_token | default('') != '' else 'nicht gesetzt' }}"
+          - "  HF_TOKEN: {{ '✅ gesetzt' if hf_token | default('') != '' else '⚠️ nicht gesetzt – siehe secrets.yml.example' }}"
           - ""
           - "  → Dienste starten: systemctl --user start ai-box"
           - "  → Open WebUI:      http://localhost:{{ webui_port }}"
