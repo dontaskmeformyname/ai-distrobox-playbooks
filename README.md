@@ -30,6 +30,33 @@ servers
 ansible_python_interpreter=/usr/bin/python3
 ```
 
+## HuggingFace Token (optional, empfohlen)
+
+Ein HuggingFace-Token erhöht die Rate-Limits beim Modell-Download und ist für einige Modelle
+pflicht (z. B. Llama 3 bei erstmaliger Nutzung). Das Token wird **lokal** gespeichert und
+**nie nach GitHub gepusht**.
+
+### Einmalig einrichten
+
+```bash
+cp secrets.yml.example secrets.yml
+nano secrets.yml   # hf_token: "hf_DEINTOKEN"
+```
+
+Token erstellen: <https://huggingface.co/settings/tokens>
+
+### Sicherheit
+
+| Datei | Im Repo? | Zweck |
+|---|---|---|
+| `secrets.yml.example` | ✅ ja | Vorlage, kein echter Token |
+| `secrets.yml` | ❌ nein (`.gitignore`) | Dein echter Token |
+
+Das Playbook gibt beim Start eine **Warnung** aus, wenn `secrets.yml` fehlt
+oder `hf_token` leer ist – es läuft aber trotzdem durch.
+Den Token nachträglich setzen und Playbook neu ausführen genügt
+– der laufende Container wird dabei nicht neu erstellt.
+
 ## Ausführung
 
 ```bash
@@ -174,6 +201,10 @@ Die benötigten Treiber/Bibliotheken werden entsprechend im Container installier
 ## Installation
 
 ```bash
+# Optional: HuggingFace Token hinterlegen (empfohlen)
+cp secrets.yml.example secrets.yml
+nano secrets.yml   # hf_token: "hf_DEINTOKEN"
+
 # 1. Text-KI: Podman Container, GPU-Treiber, Ollama, Open WebUI
 ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
 
@@ -240,6 +271,7 @@ ssh -L 8080:localhost:8080 -L 11434:localhost:11434 user@server
 | `container_name` | `ai-box` | Name des Podman-Containers |
 | `ollama_port` | `11434` | Ollama API Port |
 | `webui_port` | `8080` | Open WebUI Port |
-| `amd_gfx_version` | `11.0.0` | AMD GPU GFX-Version für ROCm |
+| `amd_gfx_version` | `""` | AMD GPU GFX-Version für ROCm (leer = auto) |
 | `data_dir` | `~/.local/share/ai-box` | Persistentes Datenverzeichnis |
 | `gpu_override` | `""` (auto) | GPU auswählen: `amd`, `amd:1`, `nvidia`, `nvidia:1`, `intel`, `cpu` |
+| `hf_token` | `""` | HuggingFace Token – via `secrets.yml` setzen, nie per CLI übergeben |
