@@ -1,16 +1,27 @@
-# Beispiel-Inventory für Remote-Ausführung per SSH
+# ==============================================================
+# Inventory – ai-distrobox-playbooks
+# Lokale Ausführung: localhost ist aktiv eingetragen
+# Remote-Hosts:      als Beispiel auskommentiert
+# ==============================================================
 
-[desktops]
-ws-a ansible_host=192.168.1.10 ansible_user=alex
-ws-b ansible_host=192.168.1.11 ansible_user=alex
+[ai_hosts]
+localhost ansible_connection=local
 
-[servers]
-ai-01 ansible_host=192.168.1.20 ansible_user=alex
-ai-02 ansible_host=192.168.1.21 ansible_user=alex
-
-[ai_hosts:children]
-desktops
-servers
+# --- Beispiel: Remote-Hosts per SSH ----------------------------
+# Gruppen anlegen und unter [ai_hosts:children] eintragen
+#
+# [desktops]
+# ws-a ansible_host=192.168.1.10 ansible_user=alex
+# ws-b ansible_host=192.168.1.11 ansible_user=alex
+#
+# [servers]
+# ai-01 ansible_host=192.168.1.20 ansible_user=alex
+# ai-02 ansible_host=192.168.1.21 ansible_user=alex
+#
+# [ai_hosts:children]
+# desktops
+# servers
+# ---------------------------------------------------------------
 
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
