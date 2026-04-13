@@ -8,12 +8,14 @@
 # raw-Tasks laufen ohne Python. Die podman-Connection führt jeden
 # raw-Befehl als eigenständigen 'podman exec'-Aufruf aus, daher kein
 # Shell-Chaining mit && möglich.
+# python3-minimal reicht nicht – Ansible-Module brauchen die volle
+# stdlib (u.a. shutil). Daher das vollständige python3-Paket.
 - name: "APT-Cache aktualisieren (Bootstrap)"
   ansible.builtin.raw: apt-get update
   changed_when: false
 
 - name: "Python3 bootstrappen (benötigt für alle Ansible-Module)"
-  ansible.builtin.raw: apt-get install -y --no-install-recommends python3-minimal
+  ansible.builtin.raw: apt-get install -y --no-install-recommends python3
   changed_when: false
 
 # -- APT-Basis ----------------------------------------------------------------
