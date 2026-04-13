@@ -3,7 +3,10 @@
 container_name: ai-box
 ollama_port: "11434"
 webui_port: "8080"
-data_dir: "{{ ansible_facts['env']['HOME'] }}/.local/share/ai-box"
+# lookup('env', 'HOME') wird auf dem Ansible-Controller ausgeführt
+# und braucht keine gather_facts. ansible_facts['env'] wäre nur mit
+# gather_facts: true verfügbar, das im Container-Play deaktiviert ist.
+data_dir: "{{ lookup('env', 'HOME') | default('~', true) }}/.local/share/ai-box"
 
 # Ollama Modellverzeichnis – liegt auf dem persistenten Volume,
 # damit Modelle einen Container-Neubau überleben.
