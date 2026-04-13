@@ -61,6 +61,41 @@
     amd_render_node: "{{ amd_dri_node.stdout | default('/dev/dri/renderD128') | trim }}"
   when: gpu_amd
 
+- name: "GID von /dev/kfd ermitteln (AMD)"
+  ansible.builtin.shell:
+    cmd: "stat -c '%g' /dev/kfd"
+  register: kfd_gid
+  when: gpu_amd
+  failed_when: false
+  changed_when: false
+
+- name: "GID des DRI-Render-Nodes ermitteln (AMD/Intel)"
+  ansible.builtin.shell:
+    cmd: "stat -c '%g' {{ amd_render_node | default('/dev/dri/renderD128') }}"
+  register: dri_gid
+  when: gpu_amd or gpu_intel
+  failed_when: false
+  changed_when: false
+
+- name: "Numerische GIDs für group_add setzen (AMD)"
+  ansible.builtin.set_fact:
+    amd_group_ids:
+      - "{{ kfd_gid.stdout | trim }}"
+      - "{{ dri_gid.stdout | trim }}"
+  when:
+    - gpu_amd
+    - kfd_gid.stdout is defined
+    - dri_gid.stdout is defined
+
+- name: "Numerische GIDs für group_add setzen (Intel)"
+  ansible.builtin.set_fact:
+    intel_group_ids:
+      - "{{ dri_gid.stdout | trim }}"
+  when:
+    - gpu_intel
+    - not gpu_amd
+    - dri_gid.stdout is defined
+
 - name: "NVIDIA GPU-Index setzen"
   ansible.builtin.set_fact:
     nvidia_gpu_index: "{{ _gpu_index }}"

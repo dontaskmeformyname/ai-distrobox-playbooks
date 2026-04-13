@@ -50,7 +50,7 @@
     device:
       - /dev/kfd
       - "{{ amd_render_node | default('/dev/dri/renderD128') }}"
-    group_add: [render, video]
+    group_add: "{{ amd_group_ids | unique }}"
     env: >-
       {{ {'OLLAMA_KEEP_ALIVE': '-1', 'DATA_DIR': '/data',
           'HSA_OVERRIDE_GFX_VERSION': amd_gfx_version}
@@ -75,6 +75,7 @@
     volumes:
       - "{{ data_dir }}:/data:z"
     device: [/dev/dri]
+    group_add: "{{ intel_group_ids | unique }}"
     env:
       OLLAMA_KEEP_ALIVE: "-1"
       DATA_DIR: /data
