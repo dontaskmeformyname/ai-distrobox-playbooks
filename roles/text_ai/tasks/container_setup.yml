@@ -4,6 +4,12 @@
 #
 # Alle ansible.builtin.*-Module arbeiten direkt im Container.
 
+# -- Python-Bootstrap (muss vor allen anderen Tasks laufen) ------------------
+- name: "Python3 bootstrappen (benötigt für alle Ansible-Module)"
+  ansible.builtin.raw: |
+    apt-get update -qq && apt-get install -y --no-install-recommends python3-minimal
+  changed_when: false
+
 # -- APT-Basis ----------------------------------------------------------------
 - name: "APT-Cache aktualisieren"
   ansible.builtin.apt:
