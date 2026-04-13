@@ -36,7 +36,9 @@
 
 - name: "Software im Container einrichten"
   hosts: ai_box_container
-  become: true
+  # containers.podman.podman verbindet via 'podman exec' direkt als root.
+  # sudo ist in ubuntu:24.04 nicht vorinstalliert – become muss false sein.
+  become: false
   gather_facts: false
   tasks:
     - ansible.builtin.include_role:
