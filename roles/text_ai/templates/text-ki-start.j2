@@ -5,8 +5,8 @@
 set -euo pipefail
 
 CONTAINER="{{ container_name }}"
-WEBUI_URL="http://localhost:{{ webui_port }}"
-OLLAMA_URL="http://localhost:{{ ollama_port }}"
+WEBUI_URL="http://127.0.0.1:{{ webui_port }}"
+OLLAMA_URL="http://127.0.0.1:{{ ollama_port }}"
 
 # Container starten falls nicht aktiv
 if ! podman container exists "$CONTAINER" 2>/dev/null; then
@@ -14,7 +14,9 @@ if ! podman container exists "$CONTAINER" 2>/dev/null; then
   exit 1
 fi
 
+{% raw %}
 if [ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]; then
+{% endraw %}
   echo "Starte Container $CONTAINER ..."
   podman start "$CONTAINER"
   sleep 2
