@@ -5,8 +5,15 @@
 # Alle ansible.builtin.*-Module arbeiten direkt im Container.
 
 # -- Python-Bootstrap (muss vor allen anderen Tasks laufen) ------------------
+# raw-Tasks laufen ohne Python. Die podman-Connection führt jeden
+# raw-Befehl als eigenständigen 'podman exec'-Aufruf aus, daher kein
+# Shell-Chaining mit && möglich.
+- name: "APT-Cache aktualisieren (Bootstrap)"
+  ansible.builtin.raw: apt-get update
+  changed_when: false
+
 - name: "Python3 bootstrappen (benötigt für alle Ansible-Module)"
-  ansible.builtin.raw: apt-get update && apt-get install -y --no-install-recommends python3-minimal
+  ansible.builtin.raw: apt-get install -y --no-install-recommends python3-minimal
   changed_when: false
 
 # -- APT-Basis ----------------------------------------------------------------
