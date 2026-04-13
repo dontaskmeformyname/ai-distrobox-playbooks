@@ -11,20 +11,23 @@
     cmd: podman exec -d {{ container_name }} supervisord -c /etc/supervisor/supervisord.conf
   when: supervisord_running.rc != 0
 
-- name: "Warten bis Ollama bereit ist (max 30s)"
+- name: "Warten bis Ollama bereit ist (max 100s)"
+  # Ollama bindet auf 0.0.0.0 (via OLLAMA_HOST in supervisor.conf),
+  # damit der gemappte Port vom Host erreichbar ist.
+  # Beim ersten Start werden ROCm-Bibliotheken geladen – mehr Zeit nötig.
   ansible.builtin.uri:
     url: "http://localhost:{{ ollama_port }}/api/tags"
     status_code: 200
   register: ollama_ready
   until: ollama_ready.status == 200
-  retries: 10
-  delay: 3
+  retries: 20
+  delay: 5
 
-- name: "Warten bis Open WebUI bereit ist (max 60s)"
+- name: "Warten bis Open WebUI bereit ist (max 120s)"
   ansible.builtin.uri:
     url: "http://localhost:{{ webui_port }}"
     status_code: 200
   register: webui_ready
   until: webui_ready.status == 200
-  retries: 20
-  delay: 3
+  retries: 24
+  delay: 5

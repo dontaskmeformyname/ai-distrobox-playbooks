@@ -11,7 +11,9 @@ command=ollama serve
 autostart=true
 autorestart=true
 startretries=5
-environment=OLLAMA_MODELS="{{ ollama_models_dir }}"
+; OLLAMA_HOST muss 0.0.0.0 sein, damit der gemappte Port vom Host
+; erreichbar ist. Standard 127.0.0.1 ist nur Container-intern.
+environment=OLLAMA_MODELS="{{ ollama_models_dir }}",OLLAMA_HOST="0.0.0.0:{{ ollama_port }}"
 stdout_logfile=/data/ollama.log
 stderr_logfile=/data/ollama.err
 
