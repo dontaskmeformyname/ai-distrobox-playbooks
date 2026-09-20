@@ -7,60 +7,22 @@ This repository now contains a **stand‑alone Ansible role** `hermes_container`
 * a **llama.cpp** server (lightweight, GPU‑friendly GGUF models)
 * a **persistent Docker volume** `hermes-data` that stores `~/.hermes` (config, memories, downloaded models, API keys, etc.)
 
-The role can be run on a **local workstation** (Docker on Ubuntu 22.04) **or** on a remote **Proxmox** host (via SSH).  All heavy files (models, secrets) live in the Docker volume, so you can delete/re‑create the container without losing state.
+# 2. Bild-KI: ComfyUI + PyTorch-ROCm im selben Container einrichten
+ansible-playbook 02_image_ai_setup.yml
 
----
-
-## New usage: Deploy Hermes Agent with a local LLM backend
-
-1. **Clone the repo (SSH – your SSH‑agent is already forwarded):**
-   ```bash
-   git clone git@github.com:alex/ai-distrobox-playbooks.git
-   cd ai-distrobox-playbooks
-   ```
-2. **Provide your Ollama‑cloud API key** (never commit it):
-   ```bash
-   echo "hermes_api_key_ollama_cloud: \"YOUR_OLLAMA_CLOUD_KEY\"" > roles/hermes_container/vars/secret.yml
-   ```
-   The file is already listed in `.gitignore`.
-3. **(Optional) Choose which backend you want:** edit `inventory/group_vars/all.yml` and set `hermes_backend` to either:
-   * `ollama` – uses the full Ollama binary (recommended if you already have many models there).
-   * `llama_cpp` – uses the tiny `llama-server` with the two GGUF models that fit a 16 GB RX 6900 XT and provide the required **≥ 64 K** context.
-4. **Run the playbook locally:**
-   ```bash
-   ansible-playbook -i inventory site.yml --ask-become-pass
-   ```
-   This will:
-   * build the Docker image `hermes-agent:ubuntu22`
-   * create the Docker volume `hermes-data`
-   * copy a minimal `config.yaml` (points Hermes at the local backend) and a `.env` with your cloud key into the volume
-   * pull the two GPU‑friendly GGUF models (`yarn‑mistral:7b‑64k‑q5_0` and `qwen3.5:9b‑64k‑q8_0`) via `ollama pull`
-   * start a container exposing the Hermes daemon on port **5000**
-5. **Verify the service:**
-   ```bash
-   curl -s http://127.0.0.1:5000/model | jq .providers
-   # should list two groups: "Local GGUF Server" and "Ollama Cloud"
-   hermes chat -q "Say exactly: OK" -p custom -t safe --max-turns 1
-   ```
-6. **Persisted data:** All Hermes data lives in the Docker volume `hermes-data`.  You can inspect it with:
-   ```bash
-   docker run --rm -v hermes-data:/hermes busybox ls -l /hermes
-   ```
-   Deleting the container (`docker rm -f hermes-agent`) does **not** delete the volume.
-
----
+# 3. Multi-User-AI-Stack (unabhängig von 01/02, Quadlet statt Distrobox)
+ansible-playbook 03_ai_stack.yml --ask-become-pass
+```
 
 ## Running on a Proxmox host (192.168.178.3)
 
-1. Ensure the target host can run Docker (install Docker Engine on Proxmox if not present).
-2. The same inventory file already contains a `[proxmox]` group pointing at `192.168.178.3`.
-3. Execute the playbook against that host:
-   ```bash
-   ansible-playbook -i inventory site.yml -l proxmox --ask-become-pass
-   ```
-   The playbook will SSH into the Proxmox host, build the exact same image there, create the volume, and start the container.  The Hermes API will then be reachable at `http://192.168.178.3:5000`.
+| Playbook | Inhalt |
+|---|---|
+| `01_text_ai_setup.yml` | Distrobox Container `ai-box`, ROCm, Ollama, Open WebUI (Port 8080) |
+| `02_image_ai_setup.yml` | ComfyUI, PyTorch-ROCm, Modell-Verzeichnisse, Start-Skript (Port 8188) |
+| `03_ai_stack.yml` | Distro-agnostischer Multi-User-AI-Stack (Podman Quadlet): Ollama/vLLM, Hermes Agent Server, Open WebUI, Authelia SSO |
 
----
+## Nach der Installation (Playbooks 01/02)
 
 ## Quick reference cheat‑sheet for the GPU‑friendly models
 
@@ -91,10 +53,51 @@ ansible-playbook -i inventory site.yml --ask-become-pass
 
 ## What changed in this repository
 
-* Added `roles/hermes_container/` (Dockerfile, Ansible role, templates, defaults, vars).
-* New `inventory/hosts.ini` with a `[local]` and `[proxmox]` entry.
-* New `inventory/group_vars/all.yml` (sets `hermes_backend` and Python path).
-* Updated `README.md` with full instructions for both local and Proxmox deployments.
-* Added `.gitignore` entry for `roles/hermes_container/vars/secret.yml` (never commit the API key).
+Die Distrobox-Playbooks (01/02) können oben in der `vars`-Sektion angepasst werden:
 
-You can now treat this repo as a **complete, reproducible bootstrap** for a Hermes Agent instance that works on your GPU‑limited hardware **and** keeps access to the Ollama cloud provider.
+- `container_name`: Name des Distrobox-Containers (Standard: `ai-box`)
+- `hsa_override`: GPU-Ziel-Architektur (RX 6900 XT = `10.3.0`)
+- `ollama_keep_alive`: `0` = VRAM sofort freigeben (empfohlen bei gleichzeitigem Betrieb)
+- `download_example_model`: `true` um SDXL automatisch herunterzuladen
+
+## 03_ai_stack.yml – Multi-User-AI-Stack (Quadlet)
+
+Unabhängig von den Distrobox-Playbooks (01/02): richtet einen dienst-orientierten
+Multi-User-AI-Stack als rootless Podman-Quadlet-Deployment ein. Alle Dienste laufen
+als systemd-User-Units des Users `aisvc` in einem gemeinsamen Pod (`ai.pod`) und
+erreichen sich intern über `127.0.0.1`.
+
+Distro-agnostisch: Ubuntu/Debian, RHEL/Fedora/Rocky, openSUSE/SLE, Arch/CachyOS.
+GPU-Erkennung erfolgt automatisch (NVIDIA via CDI, AMD via `/dev/kfd` + `/dev/dri`).
+
+| Dienst | Port | Zweck |
+|---|---|---|
+| Ollama API | 11434 | LLM-Inference mit GPU-Passthrough (`inference_engine: vllm` als Alternative, nur NVIDIA) |
+| Open WebUI | 8080 | Chat-Frontend, Login via OIDC (Authelia) |
+| Hermes Gateway | 9119 | Hermes Agent Server, Remote-Connect (Desktop: Settings → Gateway → Remote gateway) |
+| Authelia | 9091 | OIDC-IdP für zentrales User-Management |
+
+### Voraussetzungen
+
+- Podman >= 4.4 (Quadlet-Support, wird automatisch geprüft)
+- Ubuntu: `universe`-Repo aktiv; SLE: container-tools-Modul aktiviert
+
+### Vor dem Ausführen anpassen
+
+- `oidc_client_secret`: `CHANGE_ME_RANDOM_SECRET` ersetzen (Ansible Vault oder `--extra-vars` empfohlen, nicht committen)
+- `ai_models`: zu ziehende Ollama-Modelle
+- `inference_engine`: `ollama` (Standard) oder `vllm` (nur NVIDIA sinnvoll, AMD-ROCm-Support von vLLM ist experimentell)
+- Authelia-Bootstrap: Passworthashes (`authelia crypto hash generate argon2`), Session-Secret und OIDC-Client in `configuration.yml` ergänzen (Redirect-URI: `http://<webui-host>:8080/oauth/oidc/callback`)
+
+### Betrieb
+
+```bash
+sudo -u aisvc systemctl --user status ollama hermes open-webui authelia
+sudo -u aisvc journalctl --user -u ollama -f
+sudo -u aisvc podman stats
+```
+
+### Sicherheitshinweise
+
+- Port 9119 (Hermes Gateway) und 9091 (Authelia) nicht öffentlich exponieren – Hermes hat kein OIDC, nur eigene Credentials. Zugriff über WireGuard/Tailscale oder Reverse Proxy.
+- Ollama (11434) hat keine Auth – bei LAN-Betrieb PublishPort auf `127.0.0.1:11434:11434` binden.

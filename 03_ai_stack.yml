@@ -1,0 +1,492 @@
+---
+# ============================================================================
+# ai-stack.yml - GPU-bewusster Quadlet-Deploy (distro-agnostisch)
+#
+#   Unterstuetzt: Ubuntu/Debian, RHEL/Fedora/Rocky/CentOS, openSUSE/SLE, Arch/CachyOS
+#   Stack:        Ollama (oder vLLM) + Hermes Agent Server + Open-WebUI (+ Authelia SSO)
+#
+#   Voraussetzungen:
+#     - Podman >= 4.4 (Quadlet-Support), wird automatisch geprueft
+#     - Ubuntu: universe-Repo aktiv (podman)
+#     - SLE:    container-tools bzw. Desktop Applications Module aktiviert
+#     - ansible-playbook ai-stack.yml (als root oder mit -K)
+#
+#   Alle Dienste laufen rootless als systemd-User-Units des Users
+#   service_user (Default: aisvc) in einem gemeinsamen Pod (ai.pod).
+#   Container im selben Pod teilen den Network Namespace und erreichen
+#   sich unter 127.0.0.1 (Ollama: 127.0.0.1:11434, Authelia: 127.0.0.1:9091).
+#
+#   Mapping docker compose -> Quadlet:
+#     compose "networks/ports"  ->  ai.pod
+#     compose service            ->  <service>.container
+#     compose volume             ->  benannte Volume= in .container
+#     compose restart: always    ->  [Service] Restart=always
+# ============================================================================
+
+- name: AI-Stack auf frischem System ausrollen
+  hosts: localhost
+  connection: local
+  become: true
+
+  vars:
+    service_user: aisvc
+
+    # Engine: "ollama" (AMD + NVIDIA + CPU) oder "vllm" (nur NVIDIA sinnvoll,
+    # AMD-ROCm-Support von vLLM ist experimentell).
+    inference_engine: ollama
+
+    ai_models:
+      - gemma4:26b
+    ollama_context_length: "64000"   # Hermes Agent braucht >= 64K
+    ollama_flash_attention: "0"      # Workaround: FA-Bug bei Gemma 4
+
+    # Zentrales User-Management via Authelia (OIDC) fuer Open-WebUI
+    enable_sso: true
+    oidc_client_secret: CHANGE_ME_RANDOM_SECRET
+    # Produktivbetrieb: echten Hostnamen + TLS via Reverse Proxy (Caddy/nginx)
+    # verwenden, sonst schlaegt die Browser-Token-Validierung fehl.
+    authelia_issuer: "http://127.0.0.1:9091"
+
+    quadlet_dir: "/home/{{ service_user }}/.config/containers/systemd"
+    hermes_build_dir: "/home/{{ service_user }}/.config/containers/hermes"
+    authelia_conf_dir: "/home/{{ service_user }}/.config/authelia"
+
+    # Distro-abhaengige Paketnamen fuer rootless Podman
+    base_packages:
+      Debian: [podman, pciutils, uidmap, fuse-overlayfs, slirp4netns]
+      RedHat: [podman, pciutils, shadow-utils-subid, fuse-overlayfs, slirp4netns]
+      Suse: [podman, pciutils, fuse-overlayfs, slirp4netns]
+      Archlinux: [podman, pciutils]
+
+  pre_tasks:
+    - name: Basispakete installieren (auto-erkannter Paketmanager)
+      ansible.builtin.package:
+        name: "{{ base_packages[ansible_facts['os_family']] | default(['podman', 'pciutils']) }}"
+        state: present
+
+    - name: Podman-Version pruefen (Quadlet braucht >= 4.4)
+      ansible.builtin.command: podman --version
+      register: podman_version_cmd
+      changed_when: false
+
+    - name: Podman-Version validieren
+      ansible.builtin.fail:
+        msg: "Podman zu alt fuer Quadlet: {{ podman_version_cmd.stdout }}"
+      when: podman_version_cmd.stdout.split()[2] is version('4.4', '<')
+
+    - name: GPU-Vendor ermitteln (10de=NVIDIA, 1002=AMD)
+      ansible.builtin.shell: |
+        set -o pipefail
+        if lspci -n -d '10de::0300' | grep -q . \
+           || lspci -n -d '10de::0302' | grep -q .; then
+          echo nvidia
+        elif lspci -n -d '1002::0300' | grep -q . \
+           || lspci -n -d '1002::0380' | grep -q .; then
+          echo amd
+        else
+          echo none
+        fi
+      register: gpu_detect
+      changed_when: false
+
+    - name: GPU-Vendor als Fakt setzen
+      ansible.builtin.set_fact:
+        gpu_vendor: "{{ gpu_detect.stdout | trim }}"
+
+    - name: vLLM ohne NVIDIA-GPU ablehnen
+      ansible.builtin.fail:
+        msg: "vLLM auf {{ gpu_vendor }} ist nicht sinnvoll - inference_engine auf 'ollama' setzen."
+      when: inference_engine == 'vllm' and gpu_vendor != 'nvidia'
+
+    - name: GPU-abhaengige Device-Lines fuer Ollama-Quadlet definieren
+      ansible.builtin.set_fact:
+        ollama_gpu_lines: >-
+          {{ gpu_nvidia_lines if gpu_vendor == 'nvidia'
+             else (gpu_amd_lines if gpu_vendor == 'amd' else '') }}
+      vars:
+        gpu_nvidia_lines: |
+          AddDevice=nvidia.com/gpu=all
+        gpu_amd_lines: |
+          AddDevice=/dev/kfd
+          AddDevice=/dev/dri
+          GroupAdd=keep-groups
+
+  tasks:
+    # --------------------------------------------------- NVIDIA Container Toolkit
+    # Repo-Setup je Distro-Familie, danach CDI-Spezifikation generieren.
+    - name: NVIDIA Container Toolkit einrichten
+      when: gpu_vendor == 'nvidia'
+      block:
+
+        - name: NVIDIA-Repo hinzufuegen (Debian/Ubuntu)
+          when: ansible_facts['os_family'] == 'Debian'
+          ansible.builtin.shell: |
+            set -o pipefail
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+              | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -fsSL \
+              https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+              | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' \
+              > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+          args:
+            creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+        - name: NVIDIA-Repo hinzufuegen (RHEL/Fedora/Rocky)
+          when: ansible_facts['os_family'] == 'RedHat'
+          ansible.builtin.get_url:
+            url: https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+            dest: /etc/yum.repos.d/nvidia-container-toolkit.repo
+            mode: "0644"
+          # Hinweis Fedora >= 44: falls Repo-Parsing-Fehler (curl 77),
+          # stattdessen: dnf config-manager addrepo --from-repofile=<URL>
+
+        - name: NVIDIA-Repo hinzufuegen (openSUSE/SLE)
+          when: ansible_facts['os_family'] == 'Suse'
+          ansible.builtin.get_url:
+            url: https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+            dest: /etc/zypp/repos.d/nvidia-container-toolkit.repo
+            mode: "0644"
+
+        - name: NVIDIA-Container-Toolkit installieren
+          ansible.builtin.package:
+            name: nvidia-container-toolkit
+            state: present
+          # Arch: liegt in extra, Repo-Schritte oben laufen ins Leere (get_url
+          # nur bei Debian/RedHat/Suse) und werden hier uebersprungen.
+          when: ansible_facts['os_family'] != 'Archlinux'
+
+        - name: NVIDIA-Container-Toolkit installieren (Arch)
+          when: ansible_facts['os_family'] == 'Archlinux'
+          ansible.builtin.shell: pacman -S --needed --noconfirm nvidia-container-toolkit
+
+        - name: CDI-Spezifikation generieren (alle Distros identisch)
+          ansible.builtin.shell: |
+            mkdir -p /etc/cdi
+            nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+          args:
+            creates: /etc/cdi/nvidia.yaml
+
+    # ------------------------------------------------------------- Service-User
+    - name: Service-User anlegen (rootless Betrieb)
+      ansible.builtin.user:
+        name: "{{ service_user }}"
+        create_home: true
+        shell: /bin/bash
+        groups: "{{ ['render', 'video'] if gpu_vendor == 'amd' else [] }}"
+        append: true
+
+    - name: SubUID/SubGID-Range fuer rootless Podman pruefen
+      ansible.builtin.shell: |
+        grep "^{{ service_user }}:" /etc/subuid
+        grep "^{{ service_user }}:" /etc/subgid
+      register: subid_check
+      failed_when: false
+      changed_when: false
+
+    - name: SubUID-Range nachziehen falls fehlend
+      when: subid_check.rc != 0
+      ansible.builtin.shell: |
+        usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {{ service_user }}
+
+    - name: Linger aktivieren (User-Dienste starten ohne Login)
+      ansible.builtin.command: loginctl enable-linger {{ service_user }}
+      changed_when: false
+
+    - name: UID des Service-Users ermitteln
+      ansible.builtin.command: id -u {{ service_user }}
+      register: uid_cmd
+      changed_when: false
+
+    - name: Quadlet-Verzeichnisse anlegen
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0755"
+      loop:
+        - "{{ quadlet_dir }}"
+        - "{{ hermes_build_dir }}"
+        - "{{ authelia_conf_dir }}"
+
+    # ------------------------------------------------------------------ Pod
+    - name: Quadlet ai.pod ausrollen
+      ansible.builtin.copy:
+        dest: "{{ quadlet_dir }}/ai.pod"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        content: |
+          [Install]
+          WantedBy=default.target
+
+          [Pod]
+          PublishPort=11434:11434
+          PublishPort=8080:8080
+          PublishPort=9119:9119
+          PublishPort=9091:9091
+
+    # -------------------------------------------------------------- Ollama
+    - name: Quadlet ollama.container ausrollen
+      when: inference_engine == 'ollama'
+      ansible.builtin.copy:
+        dest: "{{ quadlet_dir }}/ollama.container"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        content: |
+          [Container]
+          ContainerName=ollama
+          Image=docker.io/ollama/ollama:latest
+          Pod=ai.pod
+          {{ ollama_gpu_lines }}
+          Volume=ollama-data:/root/.ollama
+          Environment=OLLAMA_CONTEXT_LENGTH={{ ollama_context_length }}
+          Environment=OLLAMA_FLASH_ATTENTION={{ ollama_flash_attention }}
+          Environment=OLLAMA_KEEP_ALIVE=30m
+          AutoUpdate=registry
+
+          [Service]
+          Restart=always
+
+          [Install]
+          WantedBy=default.target
+
+    # ---------------------------------------------------------------- vLLM
+    # Alternative bei NVIDIA + echtem Multi-User-Concurrency-Bedarf.
+    - name: Quadlet vllm.container ausrollen
+      when: inference_engine == 'vllm'
+      ansible.builtin.copy:
+        dest: "{{ quadlet_dir }}/vllm.container"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        content: |
+          [Container]
+          ContainerName=vllm
+          Image=docker.io/vllm/vllm-openai:latest
+          Pod=ai.pod
+          AddDevice=nvidia.com/gpu=all
+          Volume=vllm-cache:/root/.cache/huggingface
+          Exec=--model Qwen/Qwen3-14B --served-model-name qwen3-14B --max-model-len 32768
+
+          [Service]
+          Restart=always
+
+          [Install]
+          WantedBy=default.target
+
+    # ------------------------------------------------------------- Hermes
+    - name: Containerfile fuer Hermes Agent Server ausrollen
+      ansible.builtin.copy:
+        dest: "{{ hermes_build_dir }}/Containerfile"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        content: |
+          FROM docker.io/library/python:3.12-slim
+          RUN apt-get update \
+              && apt-get install -y --no-install-recommends \
+                 curl git ca-certificates ripgrep \
+              && rm -rf /var/lib/apt/lists/*
+          # Offizieller Installer des NousResearch/hermes-Agent-Repos:
+          RUN curl -fsSL \
+                https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh \
+                | bash
+          ENV HERMES_HOME=/data/hermes
+          EXPOSE 9119
+          # Bind-Adresse/Port-Flags vor Erststart pruefen:
+          #   podman exec -it hermes hermes serve --help
+          CMD ["hermes", "serve"]
+
+    - name: Quadlet hermes.container ausrollen
+      ansible.builtin.copy:
+        dest: "{{ quadlet_dir }}/hermes.container"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        content: |
+          [Container]
+          ContainerName=hermes
+          Image=localhost/hermes-agent:latest
+          Pod=ai.pod
+          Build={{ hermes_build_dir }}
+          Volume=hermes-home:/data/hermes
+          Environment=HERMES_HOME=/data/hermes
+          # Provider einmalig interaktiv konfigurieren (Ollama-Endpoint:
+          # http://127.0.0.1:11434 bzw. /v1):
+          #   sudo -u {{ service_user }} podman exec -it hermes hermes setup
+
+          [Service]
+          Restart=always
+
+          [Install]
+          WantedBy=default.target
+
+    # --------------------------------------------------------- Open-WebUI
+    - name: SSO-Umgebungsblock fuer Open-WebUI definieren
+      ansible.builtin.set_fact:
+        sso_lines: "{{ sso_block if enable_sso else '' }}"
+      vars:
+        sso_block: |
+          Environment=WEBUI_AUTH=True
+          Environment=ENABLE_OAUTH_SIGNUP=true
+          Environment=OAUTH_CLIENT_ID=open-webui
+          Environment=OAUTH_CLIENT_SECRET={{ oidc_client_secret }}
+          Environment=OPENID_PROVIDER_URL={{ authelia_issuer }}/.well-known/openid-configuration
+          Environment=OAUTH_PROVIDER_NAME=Authelia
+          Environment=OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
+
+    - name: Quadlet open-webui.container ausrollen
+      ansible.builtin.copy:
+        dest: "{{ quadlet_dir }}/open-webui.container"
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        content: |
+          [Container]
+          ContainerName=open-webui
+          Image=ghcr.io/open-webui/open-webui:main
+          Pod=ai.pod
+          Volume=open-webui-data:/app/backend/data
+          Environment=OLLAMA_BASE_URL=http://127.0.0.1:11434
+          {{ sso_lines }}
+          AutoUpdate=registry
+
+          [Service]
+          Restart=always
+
+          [Install]
+          WantedBy=default.target
+
+    # ------------------------------------------------------------ Authelia
+    # Leichter OIDC-IdP, Single-Container. Bootstrap (Passworthashes,
+    # OIDC-Secrets, RSA-Key: `authelia crypto pair generate`) siehe
+    # https://www.authelia.com/configuration/identity-providers/oidc/
+    - name: Authelia-Konfiguration ausrollen
+      when: enable_sso
+      block:
+        - name: users_database.yml anlegen
+          ansible.builtin.copy:
+            dest: "{{ authelia_conf_dir }}/users_database.yml"
+            owner: "{{ service_user }}"
+            group: "{{ service_user }}"
+            mode: "0600"
+            content: |
+              # Passworthash erzeugen:
+              #   podman run --rm ghcr.io/authelia/authelia:latest \
+              #     authelia crypto hash generate argon2 --password 'geheim'
+              users:
+                alexander:
+                  displayname: Alexander
+                  password: "$argon2id$REPLACE_ME"
+                  email: alexander@example.com
+                  groups:
+                    - admins
+
+        - name: configuration.yml anlegen (Skeleton)
+          ansible.builtin.copy:
+            dest: "{{ authelia_conf_dir }}/configuration.yml"
+            owner: "{{ service_user }}"
+            group: "{{ service_user }}"
+            mode: "0600"
+            content: |
+              server:
+                address: tcp://0.0.0.0:9091
+              log:
+                level: info
+              storage:
+                local:
+                  path: /config/db.sqlite3
+              session:
+                secret: REPLACE_ME_SESSION_SECRET
+                cookies:
+                  - domain: example.com
+                    authelia_url: {{ authelia_issuer }}
+              authentication_backend:
+                file:
+                  path: /config/users_database.yml
+              access_control:
+                default_policy: deny
+                rules:
+                  - domain: example.com
+                    policy: one_factor
+              notifier:
+                filesystem:
+                  filename: /config/notification.txt
+              # OIDC-Provider-Abschnitt: Client "open-webui" anlegen, mit
+              # redirect_uri http://<webui-host>:8080/oauth/oidc/callback,
+              # HMAC-Secret = oidc_client_secret aus den Playbook-Vars.
+              # identity_providers:
+              #   oidc:
+              #     hmac_secret: ...
+              #     iss: {{ authelia_issuer }}
+              #     clients:
+              #       - client_id: open-webui
+              #         client_secret: ...
+              #         redirect_uris:
+              #           - http://<webui-host>:8080/oauth/oidc/callback
+
+        - name: Quadlet authelia.container ausrollen
+          ansible.builtin.copy:
+            dest: "{{ quadlet_dir }}/authelia.container"
+            owner: "{{ service_user }}"
+            group: "{{ service_user }}"
+            mode: "0644"
+            content: |
+              [Container]
+              ContainerName=authelia
+              Image=ghcr.io/authelia/authelia:latest
+              Pod=ai.pod
+              Volume={{ authelia_conf_dir }}:/config:Z
+
+              [Service]
+              Restart=always
+
+              [Install]
+              WantedBy=default.target
+
+    # ----------------------------------------------------------- Aktivieren
+    - name: Quadlet-Units laden, aktivieren und starten
+      become: true
+      become_user: "{{ service_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ uid_cmd.stdout }}"
+      ansible.builtin.systemd:
+        scope: user
+        daemon_reload: true
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: >-
+        {{ ['ai-pod.service',
+            (inference_engine == 'ollama') | ternary('ollama.service', 'vllm.service'),
+            'hermes.service',
+            'open-webui.service']
+           + (['authelia.service'] if enable_sso else []) }}
+
+  post_tasks:
+    - name: Modelle in Ollama ziehen
+      when: inference_engine == 'ollama'
+      become: true
+      become_user: "{{ service_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ uid_cmd.stdout }}"
+      ansible.builtin.command: podman exec ollama ollama pull {{ item }}
+      loop: "{{ ai_models }}"
+      register: model_pull
+      changed_when: "'success' in model_pull.stdout"
+      failed_when: false
+
+    - name: Deployment-Report
+      ansible.builtin.debug:
+        msg:
+          - "Distro:          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "GPU-Vendor:      {{ gpu_vendor }}"
+          - "Engine:          {{ inference_engine }}"
+          - "Ollama API:      http://<host>:11434"
+          - "Open-WebUI:      http://<host>:8080"
+          - "Hermes Gateway:  http://<host>:9119  (Desktop: Settings -> Gateway -> Remote gateway)"
+          - "Authelia:        http://<host>:9091"
+          - "Firewall je Distro freigeben: firewalld (RHEL/SUSE)/ufw (Ubuntu)"
+...
