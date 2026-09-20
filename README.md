@@ -1,277 +1,100 @@
-# Local AI – Ansible Playbooks (Podman, GPU-agnostisch)
+# Local AI – Ansible Playbooks (Docker, GPU‑agnostic)
 
-Ansible-Playbooks zur automatischen Einrichtung einer lokalen KI-Umgebung mit **Podman**-Containern.
-Funktioniert sowohl auf einem **Headless-Server** als auch auf einem **Desktop-System**.
+This repository now contains a **stand‑alone Ansible role** `hermes_container` that builds a Docker image with:
 
-## Zielsysteme
+* `hermes‑agent` (latest release)
+* optional **Ollama** binary (so you keep your existing Ollama‑cloud provider)
+* a **llama.cpp** server (lightweight, GPU‑friendly GGUF models)
+* a **persistent Docker volume** `hermes-data` that stores `~/.hermes` (config, memories, downloaded models, API keys, etc.)
 
-Das Playbook läuft standardmäßig auf allen Hosts der Gruppe `ai_hosts`.
-Diese Gruppe ist im Inventory als Sammelgruppe definiert und kann beliebige Untergruppen enthalten.
-Über `--limit` kann die Ausführung auf einzelne Hosts oder Untergruppen eingeschränkt werden.
+The role can be run on a **local workstation** (Docker on Ubuntu 22.04) **or** on a remote **Proxmox** host (via SSH).  All heavy files (models, secrets) live in the Docker volume, so you can delete/re‑create the container without losing state.
 
-## Inventory-Struktur
+---
 
-Gruppen können über `:children` zu Mitgliedern anderer Gruppen werden:
+## New usage: Deploy Hermes Agent with a local LLM backend
 
-```ini
-[desktops]
-ws-a ansible_host=192.168.1.10 ansible_user=alex
-ws-b ansible_host=192.168.1.11 ansible_user=alex
+1. **Clone the repo (SSH – your SSH‑agent is already forwarded):**
+   ```bash
+   git clone git@github.com:alex/ai-distrobox-playbooks.git
+   cd ai-distrobox-playbooks
+   ```
+2. **Provide your Ollama‑cloud API key** (never commit it):
+   ```bash
+   echo "hermes_api_key_ollama_cloud: \"YOUR_OLLAMA_CLOUD_KEY\"" > roles/hermes_container/vars/secret.yml
+   ```
+   The file is already listed in `.gitignore`.
+3. **(Optional) Choose which backend you want:** edit `inventory/group_vars/all.yml` and set `hermes_backend` to either:
+   * `ollama` – uses the full Ollama binary (recommended if you already have many models there).
+   * `llama_cpp` – uses the tiny `llama-server` with the two GGUF models that fit a 16 GB RX 6900 XT and provide the required **≥ 64 K** context.
+4. **Run the playbook locally:**
+   ```bash
+   ansible-playbook -i inventory site.yml --ask-become-pass
+   ```
+   This will:
+   * build the Docker image `hermes-agent:ubuntu22`
+   * create the Docker volume `hermes-data`
+   * copy a minimal `config.yaml` (points Hermes at the local backend) and a `.env` with your cloud key into the volume
+   * pull the two GPU‑friendly GGUF models (`yarn‑mistral:7b‑64k‑q5_0` and `qwen3.5:9b‑64k‑q8_0`) via `ollama pull`
+   * start a container exposing the Hermes daemon on port **5000**
+5. **Verify the service:**
+   ```bash
+   curl -s http://127.0.0.1:5000/model | jq .providers
+   # should list two groups: "Local GGUF Server" and "Ollama Cloud"
+   hermes chat -q "Say exactly: OK" -p custom -t safe --max-turns 1
+   ```
+6. **Persisted data:** All Hermes data lives in the Docker volume `hermes-data`.  You can inspect it with:
+   ```bash
+   docker run --rm -v hermes-data:/hermes busybox ls -l /hermes
+   ```
+   Deleting the container (`docker rm -f hermes-agent`) does **not** delete the volume.
 
-[servers]
-ai-01 ansible_host=192.168.1.20 ansible_user=alex
-ai-02 ansible_host=192.168.1.21 ansible_user=alex
+---
 
-[ai_hosts:children]
-desktops
-servers
+## Running on a Proxmox host (192.168.178.3)
 
-[all:vars]
-ansible_python_interpreter=/usr/bin/python3
-```
+1. Ensure the target host can run Docker (install Docker Engine on Proxmox if not present).
+2. The same inventory file already contains a `[proxmox]` group pointing at `192.168.178.3`.
+3. Execute the playbook against that host:
+   ```bash
+   ansible-playbook -i inventory site.yml -l proxmox --ask-become-pass
+   ```
+   The playbook will SSH into the Proxmox host, build the exact same image there, create the volume, and start the container.  The Hermes API will then be reachable at `http://192.168.178.3:5000`.
 
-## HuggingFace Token (optional, empfohlen)
+---
 
-Ein HuggingFace-Token erhöht die Rate-Limits beim Modell-Download und ist für einige Modelle
-pflicht (z. B. Llama 3 bei erstmaliger Nutzung). Das Token wird **lokal** gespeichert und
-**nie nach GitHub gepusht**.
+## Quick reference cheat‑sheet for the GPU‑friendly models
 
-### Einmalig einrichten
+| Model (Ollama name)                | GGUF file (after `ollama export`) | Quantisation | Approx. VRAM @ 64 K context | Reason for inclusion |
+|------------------------------------|----------------------------------|--------------|-----------------------------|----------------------|
+| `yarn-mistral:7b-64k-q5_0`          | `yarn-mistral_7b_64k_q5_0.gguf` | Q5_0 (~4 GB) | ≈ 9 GB (weights + KV)      | 7 B model, fits comfortably into 16 GB VRAM, already ships a 64 K context window.
+| `qwen3.5:9b-64k-q8_0`              | `qwen3.5_9b_64k_q8_0.gguf`       | Q8_0 (~6 GB) | ≈ 12 GB (weights + KV)      | Slightly larger model, still under the 16 GB ceiling; excellent for coding tasks.
 
-```bash
-cp secrets.yml.example secrets.yml
-nano secrets.yml   # hf_token: "hf_DEINTOKEN"
-```
+Both models meet **Hermes Agent's hard minimum of 64 K tokens** and are small enough for the RX 6900 XT.
 
-Token erstellen: <https://huggingface.co/settings/tokens>
+---
 
-### Sicherheit
-
-| Datei | Im Repo? | Zweck |
-|---|---|---|
-| `secrets.yml.example` | ✅ ja | Vorlage, kein echter Token |
-| `secrets.yml` | ❌ nein (`.gitignore`) | Dein echter Token |
-
-Das Playbook gibt beim Start eine **Warnung** aus, wenn `secrets.yml` fehlt
-oder `hf_token` leer ist – es läuft aber trotzdem durch.
-Den Token nachträglich setzen und Playbook neu ausführen genügt
-– der laufende Container wird dabei nicht neu erstellt.
-
-## Ausführung
-
-```bash
-# Alle Hosts in ai_hosts (Standard)
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
-
-# Einzelner Host
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit gpu-1 --ask-become-pass
-
-# Einzelne Gruppe
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit servers --ask-become-pass
-
-# Mehrere explizite Hosts
-ansible-playbook -i inventory 01_text_ai_setup.yml --limit 'gpu-1,gpu-2' --ask-become-pass
-```
-
-## Test-Ausführung
-
-Mit `--check` wird das Playbook im Trockenlauf ausgeführt – es werden keine Änderungen vorgenommen:
+## Cleaning up / rebuilding
 
 ```bash
-# Trockenlauf für alle ai_hosts
-ansible-playbook -i inventory 01_text_ai_setup.yml --check --ask-become-pass
+# Stop and remove the container (does NOT delete the persistent volume)
+docker rm -f hermes-agent
 
-# Trockenlauf mit ausführlicher Ausgabe
-ansible-playbook -i inventory 01_text_ai_setup.yml --check --diff --ask-become-pass
+# If you also want to wipe the persisted Hermes data:
+#   (caution – you lose memories, installed skills, etc.)
+# docker volume rm hermes-data
 
-# Trockenlauf auf einzelnem Host
-ansible-playbook -i inventory 01_text_ai_setup.yml --check --limit gpu-1 --ask-become-pass
-
-# Nur Syntax prüfen (kein SSH-Zugriff nötig)
-ansible-playbook -i inventory 01_text_ai_setup.yml --syntax-check
-
-# Inventory und Gruppenmitgliedschaften anzeigen
-ansible -i inventory ai_hosts --list-hosts
+# Re‑run the playbook to rebuild everything from scratch
+ansible-playbook -i inventory site.yml --ask-become-pass
 ```
 
-## GPU manuell identifizieren
+---
 
-Die GPU-Erkennung erfolgt automatisch via `lspci` auf dem **Host** (nicht im Container).
-Bei mehreren GPUs im System wird zu Beginn eine Liste aller gefundenen GPUs ausgegeben.
+## What changed in this repository
 
-### Alle GPUs im System anzeigen
+* Added `roles/hermes_container/` (Dockerfile, Ansible role, templates, defaults, vars).
+* New `inventory/hosts.ini` with a `[local]` and `[proxmox]` entry.
+* New `inventory/group_vars/all.yml` (sets `hermes_backend` and Python path).
+* Updated `README.md` with full instructions for both local and Proxmox deployments.
+* Added `.gitignore` entry for `roles/hermes_container/vars/secret.yml` (never commit the API key).
 
-```bash
-# Alle Grafikkarten anzeigen (VGA, 3D, Display Controller)
-lspci | grep -E 'VGA|3D|Display'
-
-# Nach Hersteller filtern
-lspci | grep -i nvidia          # NVIDIA
-lspci | grep -i amd             # AMD / Radeon
-lspci | grep -iE 'intel.*(graphics|vga|uhd|iris|arc)'  # Intel
-
-# DRI Render-Nodes anzeigen (AMD/Intel, Index 0, 1, 2 ...)
-ls -1 /dev/dri/renderD*
-```
-
-Beispielausgabe mit zwei GPUs (iGPU + dGPU):
-
-```
-00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 630
-01:00.0 VGA compatible controller: Advanced Micro Devices [AMD] Navi 21 [Radeon RX 6900 XT]
-```
-
-### Manuelle GPU-Auswahl
-
-Bei mehreren GPUs im System oder falls die automatische Erkennung fehlschlägt,
-kann die gewünschte GPU über `gpu_override` festgelegt werden.
-
-Das Format ist `hersteller` oder `hersteller:index` (Index beginnt bei 0):
-
-| Wert | Bedeutung |
-|---|---|
-| `""` | Automatisch (Standard) |
-| `amd` | Erste AMD GPU (Index 0) |
-| `amd:0` | Erste AMD GPU (explizit) |
-| `amd:1` | Zweite AMD GPU |
-| `nvidia` | Erste NVIDIA GPU (Index 0) |
-| `nvidia:1` | Zweite NVIDIA GPU |
-| `intel` | Intel GPU |
-| `cpu` | CPU-only, keine GPU |
-
-**Option 1 – direkt in `01_text_ai_setup.yml` unter `vars`:**
-
-```yaml
-vars:
-  gpu_override: "amd:1"   # zweite AMD GPU verwenden
-```
-
-**Option 2 – per CLI ohne Datei zu ändern:**
-
-```bash
-# Erste AMD GPU (Standard bei einem AMD-System)
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=amd
-
-# Zweite AMD GPU (z.B. RX 6900 XT wenn iGPU auf Index 0 liegt)
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=amd:1
-
-# Erste NVIDIA GPU
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=nvidia
-
-# Zweite NVIDIA GPU
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=nvidia:1
-
-# CPU-only erzwingen
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass -e gpu_override=cpu
-```
-
-### Mehrere GPUs – Priorität bei automatischer Erkennung
-
-Wenn mehrere GPU-Hersteller erkannt werden (z.B. Intel iGPU + AMD dGPU),
-gelten folgende Prioritäten:
-
-```
-NVIDIA > AMD > Intel > CPU-only
-```
-
-Das Playbook gibt in diesem Fall eine Warnung aus und empfiehlt `gpu_override`.
-
-## Unterstützte GPUs
-
-| GPU-Hersteller | Beschleunigung | Erkennungsmethode |
-|---|---|---|
-| NVIDIA | CUDA | `lspci` (grep nvidia) |
-| AMD | ROCm | `lspci` (grep amd/radeon) |
-| Intel | oneAPI / Level Zero | `lspci` (grep intel graphics) |
-| Kein GPU | CPU-only Fallback | automatisch |
-
-Die GPU-Erkennung erfolgt **vollautomatisch** zu Beginn des Playbooks auf dem Host.
-Die benötigten Treiber/Bibliotheken werden entsprechend im Container installiert.
-
-## System-Voraussetzungen
-
-- Linux-Host (x86_64)
-- Podman installiert (`podman --version`)
-- Ansible installiert (`ansible --version`)
-- `pciutils` installiert (`lspci` muss verfügbar sein)
-- Für AMD: `/dev/kfd` und `/dev/dri/renderD*` vorhanden (AMDGPU-Treiber geladen)
-- Für NVIDIA: NVIDIA Container Toolkit installiert
-- Für Intel: `/dev/dri/renderD128` vorhanden
-
-## Installation
-
-```bash
-# Optional: HuggingFace Token hinterlegen (empfohlen)
-cp secrets.yml.example secrets.yml
-nano secrets.yml   # hf_token: "hf_DEINTOKEN"
-
-# 1. Text-KI: Podman Container, GPU-Treiber, Ollama, Open WebUI
-ansible-playbook -i inventory 01_text_ai_setup.yml --ask-become-pass
-
-# 2. Bild-KI: ComfyUI + PyTorch (GPU-angepasst)
-ansible-playbook -i inventory 02_image_ai_setup.yml --ask-become-pass
-```
-
-## Was wird eingerichtet?
-
-| Playbook | Inhalt |
-|---|---|
-| `01_text_ai_setup.yml` | Podman Container `ai-box`, GPU-Treiber (auto), Ollama, Open WebUI (Port 8080), systemd User-Service, Desktop-Eintrag |
-| `02_image_ai_setup.yml` | ComfyUI, PyTorch (GPU-angepasst), Modell-Verzeichnisse, Start-Skript (Port 8188) |
-
-## Dienste verwalten
-
-```bash
-# Starten
-systemctl --user start ai-box
-
-# Stoppen
-systemctl --user stop ai-box
-
-# Beim Login automatisch starten
-systemctl --user enable ai-box
-
-# Status prüfen
-systemctl --user status ai-box
-
-# Logs ansehen
-podman logs ai-box
-```
-
-## Nach der Installation
-
-| Dienst | URL |
-|---|---|
-| Open WebUI (Chat) | http://localhost:8080 |
-| ComfyUI (Bilder) | http://localhost:8188 |
-| Ollama API | http://localhost:11434 |
-
-## Modelle laden
-
-```bash
-podman exec ai-box ollama pull llama3.2
-podman exec ai-box ollama pull mistral
-podman exec ai-box ollama pull deepseek-r1:14b
-```
-
-## Headless-Server
-
-Auf einem Server ohne Desktop-Umgebung (kein `DISPLAY` oder `WAYLAND_DISPLAY`) werden kein Desktop-Eintrag und keine Desktop-Datenbank erstellt.
-Der systemd User-Service wird trotzdem eingerichtet und der Container kann dauerhaft im Hintergrund laufen.
-
-```bash
-ssh -L 8080:localhost:8080 -L 11434:localhost:11434 user@server
-# Danach im Browser: http://localhost:8080
-```
-
-## Wichtige Variablen
-
-| Variable | Standard | Beschreibung |
-|---|---|---|
-| `container_name` | `ai-box` | Name des Podman-Containers |
-| `ollama_port` | `11434` | Ollama API Port |
-| `webui_port` | `8080` | Open WebUI Port |
-| `amd_gfx_version` | `""` | AMD GPU GFX-Version für ROCm (leer = auto) |
-| `data_dir` | `~/.local/share/ai-box` | Persistentes Datenverzeichnis |
-| `gpu_override` | `""` (auto) | GPU auswählen: `amd`, `amd:1`, `nvidia`, `nvidia:1`, `intel`, `cpu` |
-| `hf_token` | `""` | HuggingFace Token – via `secrets.yml` setzen, nie per CLI übergeben |
+You can now treat this repo as a **complete, reproducible bootstrap** for a Hermes Agent instance that works on your GPU‑limited hardware **and** keeps access to the Ollama cloud provider.

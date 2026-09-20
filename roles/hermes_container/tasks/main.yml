@@ -1,0 +1,87 @@
+---
+- name: Ensure a Docker volume for persistent Hermes data
+  docker_volume:
+    name: "{{ hermes_volume_name }}"
+    state: present
+    driver_options:
+      type: none
+      device: "{{ hermes_host_path }}"
+      o: bind
+
+- name: Build the Hermes Docker image
+  docker_image:
+    name: "{{ hermes_image_name }}"
+    source: build
+    build:
+      path: "{{ role_path }}/files"
+      dockerfile: Dockerfile
+    force_source: yes
+    force_tag: yes
+  register: image_build
+
+- name: Copy the rendered config.yaml into the volume (once)
+  copy:
+    dest: "{{ hermes_host_path }}/config.yaml"
+    content: "{{ lookup('template', 'templates/hermes_config.yaml.j2') }}"
+    mode: '0600'
+  when: not lookup('fileglob', hermes_host_path + '/config.yaml', errors='ignore')
+
+- name: Copy the rendered .env (contains Ollama‑cloud key)
+  copy:
+    dest: "{{ hermes_host_path }}/.env"
+    content: "{{ lookup('template', 'templates/env.j2') }}"
+    mode: '0600'
+  when: not lookup('fileglob', hermes_host_path + '/.env', errors='ignore')
+
+- name: Pull GPU‑friendly GGUF models with Ollama (offline if already present)
+  shell: |
+    {% for model in selected_models %}
+    ollama pull {{ model }} || true
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  environment:
+    OLLAMA_HOST: "unix://{{ hermes_host_path }}/ollama.sock"
+  when: hermes_backend == 'ollama'
+
+- name: Pull the same models for llama.cpp (optional, same repo)
+  block:
+    - name: Download GGUF files from Ollama hub (fallback)
+      shell: |
+        mkdir -p {{ hermes_host_path }}/gguf_models
+        cd {{ hermes_host_path }}/gguf_models
+        {% for model in selected_models %}
+        ollama export {{ model }} -o {{ model | replace(':','_') }}.gguf || true
+        {% endfor %}
+  when: hermes_backend == 'llama_cpp'
+
+- name: Run the container (detached)
+  docker_container:
+    name: "{{ hermes_container_name }}"
+    image: "{{ hermes_image_name }}"
+    state: started
+    restart_policy: unless-stopped
+    env:
+      HERMES_HOME: "/hermes"
+    volumes:
+      - "{{ hermes_volume_name }}:/hermes:rw"
+    published_ports:
+      - "{{ hermes_http_port }}:5000"
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    command: |
+      bash -c "
+        {% if hermes_backend == 'ollama' %}
+        ollama serve &
+        OLLAMA_PID=$!
+        {% endif %}
+
+        {% if hermes_backend == 'llama_cpp' %}
+        llama-server -m /hermes/gguf_models/{{ default_gguf }} -c 65536 --host 0.0.0.0 --port 8080 &
+        LLAMA_PID=$!
+        {% endif %}
+
+        hermes daemon --log-level info
+        wait -n
+      "

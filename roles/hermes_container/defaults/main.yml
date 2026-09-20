@@ -1,0 +1,4 @@
+selected_models:
+  - yarn-mistral:7b-64k-q5_0
+  - qwen3.5:9b-64k-q8_0
+default_gguf: "yarn-mistral_7b_64k_q5_0.gguf"
