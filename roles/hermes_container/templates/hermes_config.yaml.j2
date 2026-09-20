@@ -1,0 +1,28 @@
+{% raw %}
+---
+# Hermes configuration (rendered into the persistent volume)
+model:
+  provider: custom
+  default: {{ default_gguf | replace('.gguf','') }}
+  base_url: http://127.0.0.1:8080/v1
+  context_length: 65536
+
+providers:
+  custom:
+    name: Local GGUF Server
+    base_url: http://127.0.0.1:8080/v1
+    api_mode: chat_completions
+    discover_models: false
+    default_model: {{ default_gguf | replace('.gguf','') }}
+    models:
+      {{ default_gguf | replace('.gguf','') }}:
+        context_length: 65536
+
+  ollama-cloud:
+    name: Ollama Cloud
+    base_url: https://api.ollama.com/v1
+    api_key: "{{ hermes_api_key_ollama_cloud }}"
+    api_mode: chat_completions
+    discover_models: true
+    default_model: gemma4:26b
+{% endraw %}

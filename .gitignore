@@ -1,0 +1,13 @@
+# Lokale Secrets – niemals committen
+secrets.yml
+*.secret
+.env
+
+# Ansible temporäre Dateien
+*.retry
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

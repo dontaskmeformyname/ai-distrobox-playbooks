@@ -1,0 +1,40 @@
+---
+# Podman Container
+container_name: ai-box
+ollama_port: "11434"
+webui_port: "8080"
+# lookup('env', 'HOME') wird auf dem Ansible-Controller ausgeführt
+# und braucht keine gather_facts. ansible_facts['env'] wäre nur mit
+# gather_facts: true verfügbar, das im Container-Play deaktiviert ist.
+data_dir: "{{ lookup('env', 'HOME') | default('~', true) }}/.local/share/ai-box"
+
+# Ollama Modellverzeichnis – liegt auf dem persistenten Volume,
+# damit Modelle einen Container-Neubau überleben.
+# Migration einmalig nötig falls Modelle noch im Container liegen:
+#   podman exec ai-box bash -c \
+#     "mkdir -p /data/ollama/models && \
+#      mv /root/.ollama/models/* /data/ollama/models/ 2>/dev/null || \
+#      mv /usr/share/ollama/.ollama/models/* /data/ollama/models/ 2>/dev/null"
+ollama_models_dir: "{{ data_dir }}/ollama/models"
+
+# GPU-Auswahl
+# Hersteller: "nvidia", "amd", "intel", "cpu", "" (= automatisch)
+# Mit Index:  "amd:0", "amd:1", "nvidia:1" usw.
+# Per CLI:    -e gpu_override=amd:1
+gpu_override: ""
+
+# AMD ROCm GFX-Version (leer = automatisch)
+# Wert ermitteln: rocminfo | grep 'Name:' | grep gfx
+# Beispiele:
+#   gfx1030 → 10.3.0  (RX 6800/6900 XT, RDNA2)
+#   gfx1100 → 11.0.0  (RX 7900 XTX, RDNA3)
+amd_gfx_version: ""
+
+# HuggingFace Token (aus secrets.yml, nie direkt hier setzen)
+hf_token: ""
+
+# Open WebUI Einstellungen
+# CORS auf localhost beschränken (verhindert WARNING im Log)
+cors_origin: "http://localhost:{{ webui_port }}"
+# USER_AGENT für LangChain-HTTP-Requests (verhindert WARNING im Log)
+user_agent: "open-webui"

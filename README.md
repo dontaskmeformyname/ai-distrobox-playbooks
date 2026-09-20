@@ -1,14 +1,11 @@
-# Local AI in Distrobox – Ansible Playbooks
-## Hardware-Voraussetzungen
-- AMD Radeon RX 6900 XT (RDNA2 / gfx1030)
-- 32 GB RAM
-- Linux-Host mit Distrobox & Podman installiert
+# Local AI – Ansible Playbooks (Docker, GPU‑agnostic)
 
-## Reihenfolge
+This repository now contains a **stand‑alone Ansible role** `hermes_container` that builds a Docker image with:
 
-```bash
-# 1. Text-KI: Container erstellen, ROCm + Ollama + Open WebUI einrichten
-ansible-playbook 01_text_ai_setup.yml --ask-become-pass
+* `hermes‑agent` (latest release)
+* optional **Ollama** binary (so you keep your existing Ollama‑cloud provider)
+* a **llama.cpp** server (lightweight, GPU‑friendly GGUF models)
+* a **persistent Docker volume** `hermes-data` that stores `~/.hermes` (config, memories, downloaded models, API keys, etc.)
 
 # 2. Bild-KI: ComfyUI + PyTorch-ROCm im selben Container einrichten
 ansible-playbook 02_image_ai_setup.yml
@@ -17,7 +14,7 @@ ansible-playbook 02_image_ai_setup.yml
 ansible-playbook 03_ai_stack.yml --ask-become-pass
 ```
 
-## Was wird eingerichtet?
+## Running on a Proxmox host (192.168.178.3)
 
 | Playbook | Inhalt |
 |---|---|
@@ -27,26 +24,34 @@ ansible-playbook 03_ai_stack.yml --ask-become-pass
 
 ## Nach der Installation (Playbooks 01/02)
 
-| Dienst | URL |
-|---|---|
-| Open WebUI (Chat) | http://localhost:8080 |
-| ComfyUI (Bilder) | http://localhost:8188 |
-| Ollama API | http://localhost:11434 |
+## Quick reference cheat‑sheet for the GPU‑friendly models
 
-## Modelle laden (Beispiele)
+| Model (Ollama name)                | GGUF file (after `ollama export`) | Quantisation | Approx. VRAM @ 64 K context | Reason for inclusion |
+|------------------------------------|----------------------------------|--------------|-----------------------------|----------------------|
+| `yarn-mistral:7b-64k-q5_0`          | `yarn-mistral_7b_64k_q5_0.gguf` | Q5_0 (~4 GB) | ≈ 9 GB (weights + KV)      | 7 B model, fits comfortably into 16 GB VRAM, already ships a 64 K context window.
+| `qwen3.5:9b-64k-q8_0`              | `qwen3.5_9b_64k_q8_0.gguf`       | Q8_0 (~6 GB) | ≈ 12 GB (weights + KV)      | Slightly larger model, still under the 16 GB ceiling; excellent for coding tasks.
+
+Both models meet **Hermes Agent's hard minimum of 64 K tokens** and are small enough for the RX 6900 XT.
+
+---
+
+## Cleaning up / rebuilding
 
 ```bash
-# Text-Modelle (im Container)
-distrobox enter ai-box -- ollama pull llama3.2
-distrobox enter ai-box -- ollama pull mistral
-distrobox enter ai-box -- ollama pull deepseek-r1:14b
+# Stop and remove the container (does NOT delete the persistent volume)
+docker rm -f hermes-agent
 
-# Bild-Modell herunterladen (SDXL ~6 GB)
-# In 02_image_ai_setup.yml: download_example_model: true setzen
-# und Playbook erneut ausführen
+# If you also want to wipe the persisted Hermes data:
+#   (caution – you lose memories, installed skills, etc.)
+# docker volume rm hermes-data
+
+# Re‑run the playbook to rebuild everything from scratch
+ansible-playbook -i inventory site.yml --ask-become-pass
 ```
 
-## Wichtige Variablen
+---
+
+## What changed in this repository
 
 Die Distrobox-Playbooks (01/02) können oben in der `vars`-Sektion angepasst werden:
 

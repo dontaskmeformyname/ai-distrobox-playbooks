@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
-export HSA_OVERRIDE_GFX_VERSION={{ hsa_override }}
-export OLLAMA_KEEP_ALIVE={{ ollama_keep_alive }}
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:$PATH"
-export DATA_DIR="$HOME/.local/share/open-webui"
+# Startet Ollama + Open WebUI im Podman Container und öffnet den Browser
 
-if ! pgrep -x ollama > /dev/null; then
-    ollama serve >/tmp/ollama.log 2>&1 &
+CONTAINER="{{ container_name }}"
+OLLAMA_PORT="{{ ollama_port }}"
+WEBUI_PORT="{{ webui_port }}"
+
+# Container starten falls nicht aktiv
+if ! podman ps --format '{{ '{{' }}.Names{{ '}}' }}' | grep -q "^${CONTAINER}$"; then
+    podman start "${CONTAINER}"
+    sleep 2
+fi
+
+# Ollama starten falls nicht aktiv
+if ! podman exec "${CONTAINER}" pgrep -x ollama > /dev/null 2>&1; then
+    podman exec -d "${CONTAINER}" bash -c 'ollama serve >/tmp/ollama.log 2>&1'
     sleep 3
 fi
 
-if ! pgrep -f "open-webui" > /dev/null; then
-    OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }} \
-      /usr/local/bin/open-webui serve >/tmp/open-webui.log 2>&1 &
+# Open WebUI starten falls nicht aktiv
+if ! podman exec "${CONTAINER}" pgrep -f 'open-webui' > /dev/null 2>&1; then
+    podman exec -d "${CONTAINER}" bash -c \
+        'OLLAMA_BASE_URL=http://127.0.0.1:{{ ollama_port }} \
+         DATA_DIR=/data \
+         open-webui serve --port {{ webui_port }} >/tmp/open-webui.log 2>&1'
 fi
 
+# Auf WebUI warten (max. 60 Sekunden)
 for i in $(seq 1 60); do
-    curl -sf http://127.0.0.1:{{ webui_port }} >/dev/null && break
+    curl -sf "http://127.0.0.1:${WEBUI_PORT}" >/dev/null && break
     sleep 1
 done
 
-xdg-open http://127.0.0.1:{{ webui_port }}
+# Browser öffnen (nur auf Desktop)
+if [ -n "${DISPLAY}" ] || [ -n "${WAYLAND_DISPLAY}" ]; then
+    xdg-open "http://127.0.0.1:${WEBUI_PORT}"
+fi

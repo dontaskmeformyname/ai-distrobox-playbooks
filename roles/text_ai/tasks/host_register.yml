@@ -1,0 +1,24 @@
+---
+# Registriert den Podman-Container als dynamischen Ansible-Host,
+# damit Play 3 (container_setup.yml) ihn über die
+# containers.podman.podman-Connection direkt ansprechen kann.
+#
+# add_host legt einen flüchtigen Host in der Gruppe ai_box_container
+# an. Die Verbindungsvariablen werden direkt hier gesetzt, sodass
+# ansible_connection auf Play-Ebene greift und *nicht* per task-vars
+# gesetzt werden muss (was den "Container not found"-Fehler erzeugt).
+
+- name: "Container als Ansible-Host registrieren"
+  ansible.builtin.add_host:
+    name: "{{ container_name }}"
+    groups: ai_box_container
+    ansible_connection: containers.podman.podman
+    ansible_podman_container: "{{ container_name }}"
+    # Facts aus dem aktuellen Host weitergeben
+    gpu_nvidia: "{{ gpu_nvidia }}"
+    gpu_amd: "{{ gpu_amd }}"
+    gpu_intel: "{{ gpu_intel }}"
+    hf_token: "{{ hf_token | default('') }}"
+    cors_origin: "{{ cors_origin }}"
+    user_agent: "{{ user_agent }}"
+  changed_when: false
